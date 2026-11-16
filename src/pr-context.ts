@@ -5,7 +5,7 @@ import type { GitIdentity } from './prepare.js';
 const MAX_PR_CONTEXT_BYTES = 200 * 1024;
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
 const text = (max: number) => z.string().max(max);
-const disposition = z.enum(['evaluated', 'unresolved', 'not_applicable', 'not_evaluated']);
+const disposition = z.enum(['evaluated', 'observed', 'unresolved', 'not_applicable', 'not_evaluated']);
 const finding = z.enum(['none', 'binding_violation', 'behavioral_defect', 'guidance_departure']);
 const entry = z.strictObject({
     nodeId: text(500).startsWith('context://'),

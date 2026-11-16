@@ -61,6 +61,7 @@ export async function guarded(stage, fn) {
         const codes = [
             'package_version_missing',
             'invalid_package_version',
+            'action_release_manifest_invalid',
             'configuration_unavailable',
             'github_token_missing',
             'github_read_failed',
@@ -78,8 +79,10 @@ export async function guarded(stage, fn) {
         ];
         const code = codes.includes(error?.message) ? error.message : `${stage}_failed`;
         if (e.ASSESS_ROOT) write(join(e.ASSESS_ROOT, `${stage}-status.json`), { status: 'failed', code });
-        const help = ['package_version_missing', 'invalid_package_version'].includes(code)
-            ? ' Configure package-version with a qualified exact published npm version; there is no source fallback.'
+        const help = ['package_version_missing', 'invalid_package_version', 'action_release_manifest_invalid'].includes(
+            code,
+        )
+            ? ' Select a published Action release with a valid manifest, or set package-version to an exact published npm version; there is no source fallback.'
             : '';
         logError(
             `::error::ContextRail ${stage}: ${code}.${help} No success is implied; inspect the summary and available evidence.`,

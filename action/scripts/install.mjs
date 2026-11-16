@@ -3,6 +3,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { e, fail, guarded, output, read, runtimeEnvironment, write } from './common.mjs';
+import { releaseChannel } from './promote-release.mjs';
 
 const positive = (v, max) => /^[1-9][0-9]*$/.test(v ?? '') && Number.isSafeInteger(Number(v)) && Number(v) <= max;
 const bounded = (v, pattern, max = 500) => typeof v === 'string' && v.length <= max && pattern.test(v);
@@ -13,7 +14,17 @@ function validatePackageVersion() {
     const version = new RegExp(
         `^${number}\\.${number}\\.${number}(?:-${prerelease}(?:\\.${prerelease})*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$`,
     );
-    if (!e.PACKAGE_VERSION) fail('package_version_missing');
+    if (!e.PACKAGE_VERSION) {
+        const release = read(join(e.GITHUB_ACTION_PATH, '../release.json'));
+        const manifest = read(join(e.GITHUB_ACTION_PATH, '../package.json'));
+        try {
+            releaseChannel(release);
+            if (manifest?.name !== '@contextrail/assess' || manifest.version !== release.version) throw new Error();
+            e.PACKAGE_VERSION = release.version;
+        } catch {
+            fail('action_release_manifest_invalid');
+        }
+    }
     if (!bounded(e.PACKAGE_VERSION, version, 100)) fail('invalid_package_version');
 }
 function mcpUrl() {

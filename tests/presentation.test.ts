@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { createPhaseRecord } from '../src/phases.js';
 import { digest, type GitIdentity } from '../src/prepare.js';
+import { collectGitHubContext } from '../src/github.js';
+import { parsePrContext } from '../src/pr-context.js';
 import {
     assessmentCoverage,
     groupDeveloperFindings,
@@ -12,6 +14,7 @@ import {
     runRecord,
     withHistory,
     readHistory,
+    assessmentMarker,
 } from '../src/presentation.js';
 const state = {
     runId: 'run-1',
@@ -218,6 +221,54 @@ describe('governed presentation', () => {
         const next = readHistory(withHistory('failed', { body }, record, config), config)!;
         expect(next.assessment?.run).toBe('100');
         expect(next.runs).toHaveLength(2);
+    });
+    it('accepts published observed outcomes when collecting context for the next assessment', async () => {
+        const config = {
+            version: 1 as const,
+            repository: 'acme/project',
+            pr: 3,
+            reviewer: 'skill://engineering/review',
+            githubRun: '100',
+            githubAttempt: 1,
+            base: 'a'.repeat(40),
+            head: 'b'.repeat(40),
+            baseBranch: '',
+        };
+        const previous = {
+            ...state,
+            entries: [
+                ...state.entries,
+                {
+                    assessmentId: 'observation',
+                    nodeId: 'context://engineering/observation',
+                    version: 1,
+                    result: { disposition: 'observed', finding: 'none', explanation: 'No concern identified.' },
+                },
+            ],
+        };
+        const record = runRecord(config, config, previous, 0, 0.03, true);
+        const body = withHistory(`${assessmentMarker(config)}\nAssessment`, null, record, config);
+        const context = await collectGitHubContext(
+            config,
+            {},
+            async (path) => {
+                if (path.startsWith('/issues/3/comments'))
+                    return [{ id: 1, body, user: { login: 'github-actions[bot]', type: 'Bot' } }];
+                throw new Error('unavailable');
+            },
+            true,
+        );
+        const artifact = {
+            base: { commit: config.base },
+            head: { commit: config.head },
+            repositoryEnvironment: { status: 'unavailable' },
+        } as GitIdentity;
+        const parsed = parsePrContext(context, artifact, config.reviewer);
+        expect(parsed.history.status).toBe('available');
+        expect(parsed.history.assessment?.entries.map((entry) => entry.disposition)).toEqual(
+            previous.entries.map((entry) => entry.result.disposition),
+        );
+        expect(parsed.history.assessment?.entries.some((entry) => entry.disposition === 'observed')).toBe(true);
     });
 });
 

@@ -511,6 +511,54 @@ describe('GitHub adapter boundaries', () => {
 });
 
 describe('inline publication integration', () => {
+    it('publishes startup failure without attempting inline source inspection', async () => {
+        const root = mkdtempSync(join(tmpdir(), 'assess-startup-publish-'));
+        roots.push(root);
+        writeFileSync(
+            join(root, 'github-input.json'),
+            JSON.stringify({
+                version: 1,
+                repository: 'acme/project',
+                pr: 1,
+                reviewer,
+                base,
+                head,
+                baseBranch: 'alpha',
+                githubRun: '10',
+                githubAttempt: 1,
+            }),
+        );
+        writeFileSync(join(root, 'assessment-status.json'), JSON.stringify({ status: 'failed' }));
+        const writes: string[] = [];
+        const result = await publishGitHubAssessment({
+            runDir: root,
+            githubDir: root,
+            postComment: true,
+            inlineComments: true,
+            token: 'fixture-token',
+            fetch: async (input, init) => {
+                const url = String(input);
+                if (init?.method === 'POST') {
+                    expect(url).toContain('/issues/1/comments');
+                    writes.push(JSON.parse(String(init.body)).body);
+                    return new Response(JSON.stringify({ id: 7 }), { status: 201 });
+                }
+                if (url.includes('/comments?')) return new Response('[]');
+                if (url.endsWith('/pulls/1'))
+                    return new Response(
+                        JSON.stringify({
+                            number: 1,
+                            base: { sha: base, ref: 'alpha', repo: { full_name: 'acme/project' } },
+                            head: { sha: head },
+                        }),
+                    );
+                throw new Error(`Unexpected request: ${url}`);
+            },
+        });
+        expect(result).toMatchObject({ exitCode: 0, commentStatus: 'created', inlineStatus: 'disabled' });
+        expect(writes).toHaveLength(1);
+        expect(writes[0]).toContain('Review could not finish');
+    });
     it('creates a comment-only review with exact pinned suggestion payload and preserves the assessment', async () => {
         const root = mkdtempSync(join(tmpdir(), 'review-inline-publish-'));
         roots.push(root);

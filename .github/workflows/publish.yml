@@ -72,3 +72,22 @@ jobs:
         env:
           CHANNEL: ${{ steps.release.outputs.channel }}
         run: npm publish --access public --provenance --tag "$CHANNEL"
+  promote:
+    name: Advance major release channel
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.15.0'
+      - name: Promote only an available package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node action/scripts/promote-release.mjs

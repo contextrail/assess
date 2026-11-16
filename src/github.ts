@@ -1456,7 +1456,9 @@ async function inlinePublicationPlan(
     request: Requester | null,
 ): Promise<InlinePlan> {
     const empty = { comments: [], omitted: 0, duplicates: 0 };
-    if (!options.inlineComments) return { inline: empty, status: 'disabled', exitCode: 0 };
+    // Startup failures have no assessment snapshot to anchor inline feedback to.
+    if (!options.inlineComments || !Object.keys(state).length)
+        return { inline: empty, status: 'disabled', exitCode: 0 };
     let existing: unknown[] = [];
     if (request) {
         try {

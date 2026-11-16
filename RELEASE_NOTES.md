@@ -1,6 +1,6 @@
-## 1.0.0-alpha.2 (2026-11-16)
+## 1.0.0-alpha.3 (2026-11-16)
 
-### Fixes and improvements
+### Features
 
-* **assess:** keep external evidence follow-ups nonblockking 8c6e551
+* **assess:** add floating release version 255c323
 

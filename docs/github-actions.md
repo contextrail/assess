@@ -13,20 +13,30 @@ Complete [standards setup](standards.md), then add these in **Settings → Secre
 | -------- | ---------------------------- | ------------------------------------------------------------- |
 | Variable | `CONTEXTRAIL_MCP_URL`        | Your authorized HTTPS MCP endpoint                            |
 | Variable | `CONTEXTRAIL_MCP_ORG_ID`     | Your organization ID                                          |
-| Variable | `ASSESS_VERSION`             | An exact published `@contextrail/assess` version              |
 | Variable | `ASSESS_MODEL`               | A tool-capable OpenAI model ID available to your account      |
 | Secret   | `CONTEXTRAIL_MCP_AUTH_TOKEN` | Token authorized for the selected skill/contexts and feedback |
 | Secret   | `OPENAI_API_KEY`             | Your provider key                                             |
 
-Choose a version with `npm view @contextrail/assess dist-tags`. Use the resulting exact version,
-not `alpha`, `latest` or a range. The public Action revision and installed npm version are separate
-identities: review the Action source and copy its full 40-character commit SHA from
-[the public repository](https://github.com/contextrail/assess). Neither identity automatically qualifies the other.
+## Choose an update policy
+
+Use `contextrail/assess/action@v1-alpha` during alpha. After a stable v1 release exists,
+use `@v1` to receive compatible v1 updates. Moving to v2 is a deliberate workflow change.
+Alpha is experimental and does not carry the stable compatibility promise.
+
+Each channel advances only after the matching npm package is downloadable. The Action reads
+its release manifest and installs that exact version; there is no separate package variable to maintain.
+For controlled upgrades or rollback, use an exact release tag such as `@v1.0.0-alpha.3`,
+or its full public commit SHA. Exact tags remain protected; floating tags have no GitHub Release attached.
+Only select a release that has actually been published.
+
+A channel opts into future releases by the publisher; it is not an immutable source pin.
+A fresh run, including a rerun, can resolve a newer channel revision. Pin the recorded commit
+when reproducing an earlier run. For an independently qualified package override, the low-level
+`package-version` input still accepts an exact version; it is unnecessary for normal use.
 
 ## Add the workflow
 
-Save this as `.github/workflows/contextrail-assess.yml`. Replace `ACTION_COMMIT_SHA` and the
-reviewer skill ID before committing it. No contribution checkout is needed.
+Save this as `.github/workflows/contextrail-assess.yml`. Replace the reviewer skill ID before committing it. No contribution checkout is needed.
 
 ```yaml
 name: ContextRail Assess
@@ -50,9 +60,8 @@ jobs:
             pull-requests: write
         steps:
             - name: Assess proposed changes
-              uses: contextrail/assess/action@ACTION_COMMIT_SHA
+              uses: contextrail/assess/action@v1-alpha
               with:
-                  package-version: ${{ vars.ASSESS_VERSION }}
                   pr-number: ${{ inputs.pr-number }}
                   reviewer: skill://engineering/your-reviewer
                   mcp-url: ${{ vars.CONTEXTRAIL_MCP_URL }}
@@ -92,7 +101,9 @@ confirms ingestion only. [Results and next actions](review-results.md) explains 
 
 Repository variable names belong to your caller workflow. In this example `ASSESS_MODEL` is passed
 explicitly to the Action; setting it alone in a local shell does not configure the CLI. The maintained
-monorepo caller additionally supports `ASSESS_EFFORT`, `ASSESS_VERIFY_MODEL`, `ASSESS_VERIFY_EFFORT`
+monorepo caller uses one `ASSESS_RELEASE` variable (default `v1-alpha`) and records the resolved
+public Action SHA and exact npm version in the summary and a `contextrail-assess-release-*` artifact.
+It also supports `ASSESS_EFFORT`, `ASSESS_VERIFY_MODEL`, `ASSESS_VERIFY_EFFORT`
 and `ASSESS_ENFORCEMENT`. Standalone CLI aliases use `CONTEXTRAIL_ASSESS_*`.
 
 ## Triggers, permissions and trust

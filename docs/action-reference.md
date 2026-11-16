@@ -8,7 +8,7 @@ Look up a specific setting here. For a first integration, use [GitHub Actions se
 
 | Input                                  | Contract                                                                                                                                                          |
 | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `package-version`                      | Required exact published npm SemVer. No tags, ranges, URLs, local builds or unavailable-version fallback.                                                         |
+| `package-version`                      | Optional exact npm version override. Omit to install the matching version from the Action release manifest. No npm tags, ranges, URLs or local fallback.          |
 | `pr-number`, `base-branch`             | Required PR number; optional expected target branch.                                                                                                              |
 | `reviewer`                             | Required reusable published `skill://` ID; never an execution or repository ID.                                                                                   |
 | `mcp-url`, `mcp-org-id`                | Required HTTPS endpoint and organization scope, using CLI connection vocabulary.                                                                                  |
@@ -81,5 +81,6 @@ or job timeout can still prevent summary/comment execution. The caller must seri
 GitHub creation has no atomic compare-and-set; concurrent runs can race after absence checks.
 The npm package owns presentation and GitHub adapter behavior; the Action invokes it.
 
-After publishing this Action update, adopt its full public commit SHA as well as the intended
-exact npm version. Re-running an old workflow retains its old Action code and inputs.
+Select a major release channel, exact release tag or public commit SHA; the Action defaults to its
+matching npm package. See [release selection](github-actions.md#choose-an-update-policy). Floating
+channels can resolve differently on a later run; pin an exact commit to reproduce a prior selection.

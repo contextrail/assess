@@ -38,9 +38,16 @@ there. The npm package's `files` list also includes docs so installed README lin
 `release.json` binds the selected version and channel to the upstream commit; the public Action
 commit is a separate immutable identity.
 
-After successful publication, consumers update both the full Action SHA and exact npm version.
-Verify registry availability before dispatching a review. The README badges track npm's
-`latest` and `alpha` channels automatically; they do not choose either consumer pin.
+After publication, a separate job with Contents write permission waits for npm metadata and the
+tarball, then advances `v<major>-alpha` or stable `v<major>`. It never moves a channel backward
+when an older release is retried. These are lightweight tags, not GitHub Releases; exact version
+tags remain immutable. Failed or pending publication leaves the channel unchanged.
+
+If promotion times out while npm validates the upload, rerun the failed promotion job after the
+package becomes available; do not republish an existing npm version. Publication jobs are serialized.
+Tag rules must permit the intended floating channels while protecting exact release tags.
+Consumers following a channel need no variable update. Exact tag/SHA consumers opt into each upgrade.
+The README badges track npm's `latest` and `alpha` dist-tags, not the Git major channels.
 
 See [Action qualification](github-actions.md#qualify-and-operate-a-consumer) for the live
 integration check and [architecture](architecture.md) before changing the harness.

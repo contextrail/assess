@@ -2,8 +2,9 @@ name: ContextRail Assess
 description: Install ContextRail Assess and assess a caller-selected fixed PR comparison with retained evidence.
 inputs:
   package-version:
-    description: 'Exact published @contextrail/assess npm version; no fallback.'
-    required: true
+    description: 'Optional exact npm version override. Defaults to the matching version in this Action release manifest.'
+    required: false
+    default: ''
   pr-number:
     description: 'PR number in the workflow repository; the caller owns run authorization.'
     required: true

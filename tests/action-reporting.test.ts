@@ -842,6 +842,80 @@ describe('package-owned Action handoffs', () => {
 });
 
 describe('Action enforcement boundary', () => {
+    it.each(['matching', 'missing', 'mismatched'])('handles a %s release manifest before installation', (mode) => {
+        const root = mkdtempSync(join(tmpdir(), 'assess-release-install-'));
+        roots.push(root);
+        mkdirSync(join(root, 'action'));
+        mkdirSync(join(root, 'bin'));
+        const version = '1.0.0-alpha.3';
+        if (mode !== 'missing')
+            writeFileSync(
+                join(root, 'release.json'),
+                JSON.stringify({
+                    version,
+                    sourceSha: 'a'.repeat(40),
+                    branch: 'alpha',
+                    channel: 'alpha',
+                }),
+            );
+        writeFileSync(
+            join(root, 'package.json'),
+            JSON.stringify({
+                name: '@contextrail/assess',
+                version: mode === 'mismatched' ? '1.0.0' : version,
+            }),
+        );
+        writeFileSync(join(root, 'event.json'), '{}');
+        writeFileSync(
+            join(root, 'bin/npm'),
+            `#!${process.execPath}
+const fs = require('node:fs');
+const version = process.argv.at(-1).split('@').at(-1);
+fs.mkdirSync('node_modules/@contextrail/assess', { recursive: true });
+fs.writeFileSync('node_modules/@contextrail/assess/package.json', JSON.stringify({
+    name: '@contextrail/assess', version, bin: { 'contextrail-assess': 'dist/cli.js' }
+}));
+fs.writeFileSync('package-lock.json', '{}');
+`,
+            { mode: 0o755 },
+        );
+        const result = spawnSync(
+            process.execPath,
+            [fileURLToPath(new URL('../action/scripts/install.mjs', import.meta.url))],
+            {
+                encoding: 'utf8',
+                env: {
+                    PATH: `${join(root, 'bin')}:${process.env.PATH}`,
+                    RUNNER_TEMP: root,
+                    GITHUB_ACTION_PATH: join(root, 'action'),
+                    GITHUB_OUTPUT: join(root, 'output'),
+                    GITHUB_EVENT_PATH: join(root, 'event.json'),
+                    GITHUB_EVENT_NAME: 'workflow_dispatch',
+                    GITHUB_REPOSITORY: 'acme/project',
+                    GITHUB_SERVER_URL: 'https://github.com',
+                    PR_NUMBER: '83',
+                    REVIEWER: reviewer,
+                    MCP_URL: 'https://example.com/mcp',
+                    MCP_ORG_ID: 'fixture',
+                    PROVIDER: 'openrouter',
+                    MODEL: 'fixture',
+                    EFFORT: '',
+                    MAX_TIME_MS: '1000',
+                    FEEDBACK: 'off',
+                    REPOSITORY_ATTRIBUTION: 'true',
+                    ARTIFACT_RETENTION_DAYS: '7',
+                },
+            },
+        );
+        expect(result.status, result.stderr).toBe(mode === 'matching' ? 0 : 2);
+        const installedRoot = readFileSync(join(root, 'output'), 'utf8').match(/^root=(.+)$/m)![1]!;
+        const status = JSON.parse(readFileSync(join(installedRoot, 'setup-status.json'), 'utf8'));
+        if (mode === 'matching') expect(status).toMatchObject({ status: 'installed', version });
+        else {
+            expect(status.code).toBe('action_release_manifest_invalid');
+            expect(existsSync(join(installedRoot, 'tool'))).toBe(false);
+        }
+    });
     it('rejects unknown enforcement before installing a package', () => {
         const root = mkdtempSync(join(tmpdir(), 'review-action-invalid-policy-'));
         roots.push(root);

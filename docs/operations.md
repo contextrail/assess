@@ -95,8 +95,10 @@ syntax details remain unknown rather than being inferred from a generic exceptio
 Start with the Action summary's terminal failure, then open `diagnostics.jsonl` in the
 artifact. Correlate events by run ID, phase, attempt and call. The summary links the stop
 reason to the last failing provider request in that phase; a recovered earlier error is
-not the final cause. Updated summary behavior requires the new Action SHA as well as the
-new npm package; changing `ASSESS_VERSION` alone does not update Action scripts.
+not the final cause. Use the release identity in the summary to confirm which Action and package ran. The monorepo
+retains `assess-release.json` in its release artifact. `ASSESS_RELEASE` selects both identities;
+a floating channel advances after publication. For rollback, select the recorded public commit
+SHA or exact release tag, then start a fresh dispatch.
 
 At `info`, phase boundaries, provider request start/completion, assessment progress,
 recovery, reporting and final outcome appear on stderr. `debug` also shows tool activity,
