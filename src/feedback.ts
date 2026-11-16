@@ -32,6 +32,21 @@ function reportedFinding(state: AssessmentState, entry: AssessmentState['entries
         ) ?? 'none'
     );
 }
+function externalEvidenceCounts(state: AssessmentState, assessmentId: string) {
+    const counts = { external_dependency: 0, operational_state: 0, business_record: 0 };
+    for (const item of state.followUps ?? []) {
+        if (
+            item.assessmentId !== assessmentId ||
+            item.kind !== 'external_evidence' ||
+            !item.verified ||
+            item.required ||
+            !item.externalEvidence
+        )
+            continue;
+        counts[item.externalEvidence.kind]++;
+    }
+    return Object.values(counts).some((count) => count > 0) ? { externalEvidence: counts } : {};
+}
 /** Construct from the allowlist. Never serialize local state then remove fields. */
 export function projectAssessmentReport(state: AssessmentState, repositoryAttribution = false): ReviewReportInput {
     if (!state.reviewer || !state.decision || state.assessmentStatus === 'running')
@@ -63,7 +78,7 @@ export function projectAssessmentReport(state: AssessmentState, repositoryAttrib
         runId: state.runId,
         origin: 'npm',
         packageVersion,
-        methodVersion: state.concernValidation ? 'candidate-adherence-v2' : 'artifact-review-v1',
+        methodVersion: state.concernValidation ? 'candidate-adherence-v3' : 'artifact-review-v1',
         reviewer: { nodeId: state.reviewer.nodeId, version: state.reviewer.version },
         repository: repositoryAttribution
             ? repository.status === 'reported'
@@ -87,6 +102,7 @@ export function projectAssessmentReport(state: AssessmentState, repositoryAttrib
             blocking: state.decision!.reasons.some(
                 (reason) => reason.assessmentId === entry.assessmentId && reason.blocking,
             ),
+            ...externalEvidenceCounts(state, entry.assessmentId),
         })),
         runner: {
             policy: {

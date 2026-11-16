@@ -137,14 +137,16 @@ feedback or GitHub writes, which may already have taken effect.
 `--feedback send|off` defaults to **send**. After local finalization, `send` reports
 only run/contract identity, origin and package/method version, exact reviewer/context
 versions, expected scope, structured dispositions, adherence/confidence, finding
-categories, policy/blocking decisions, completion/stop reason, and known duration,
+categories, per-standard external evidence category counts when present, policy/blocking decisions, completion/stop reason, and known duration,
 provider/model/harness, call counts and provider-reported token usage with missingness.
 A receipt confirms ingestion, not correctness.
 
-Method `candidate-adherence-v2` reports observations and focused concern validation counts.
+Method `candidate-adherence-v3` reports observations and focused concern validation counts.
 Observed rows do not claim verified compliance. A complete execution is
-not a claim that external tests or deployment checks are complete. Out-of-scope operational
-nominations remain in raw observations and decisions, not actionable PR follow-ups. The independently
+not a claim that external tests or deployment checks are complete. Independently classified external
+follow-ups stay nonblocking; their subjects, explanations, suggested actions and source citations remain
+in the customer's evidence bundle. Feedback includes only per-standard counts for external dependencies,
+operational state and business records. These counts record limitations, not violations or compliance. The independently
 checked change overview stays in local reports and PR output, outside the metadata feedback allowlist. Earlier reports retain their original method and interpretation.
 
 Repository identity is withheld by default on both retrieval and review feedback.
@@ -192,12 +194,18 @@ preserved). A missing narrative does not itself make an otherwise completed arti
 
 ## Observation-based reports
 
-The `candidate-adherence-v2` method records immutable observation groups and focused concern decisions.
-Deploy the API report-contract support for `observed`, nullable confidence and `concernValidation`
+The `candidate-adherence-v3` method records immutable observation groups and focused concern decisions.
+Deploy the API report-contract support for `observed`, nullable confidence, `concernValidation`
+and optional per-outcome `externalEvidence` category counts
 before enabling feedback from this reviewer. The published package export and consumer workflow
 continue to use the existing CLI and Action inputs; no benchmark scripts are required at runtime.
 Inspect `state.observations`, `state.concernDecisions`, and the hash-bound phase artifacts to distinguish
 an assessment omission from a rejected concern, missing premise or execution failure. No-concern
 observations remain unvalidated rather than receiving a fabricated compliance score. The reader
 summary is separately checked; an unavailable summary is reported without discarding completed
-standards judgments. Older judgment-based saved runs need a new run rather than silent conversion.
+standards judgments. Older judgment-based saved runs and `candidate-observation-v2` checkpoints need a fresh run rather than silent conversion. The new method distinguishes externally unavailable evidence from unresolved artifact judgments; previous decisions are not relabeled under the new semantics.
+
+For the external-evidence update, deploy the API before publishing/adopting the new Assess package.
+An older strict report schema rejects the added field when follow-ups exist; Assess records that
+feedback failure rather than silently removing the limitation metadata. Local assessment results and
+policy exits remain available. No new workflow input is required.

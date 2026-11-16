@@ -63,13 +63,26 @@ Choose `--enforcement advisory|required|strict`, or the Action's `enforcement` i
 | Recorded outcome                                                     | advisory | required | strict |
 | -------------------------------------------------------------------- | -------- | -------- | ------ |
 | Supported binding violation                                          | 0        | 1        | 1      |
-| Unresolved evidence, without a supported violation                   | 0        | 0        | 1      |
+| Unresolved in-scope evidence, without a supported violation          | 0        | 0        | 1      |
+| External evidence follow-up, without another blocking outcome        | 0        | 0        | 0      |
 | No binding violations or unresolved evidence                         | 0        | 0        | 0      |
 | Execution failed or the required usable report could not be produced | 2        | 2        | 2      |
 
 Guidance departures remain suggestions. An observed entry is not an evidence gap merely because it
 lacks independent compliance certification. A finished assessment can leave a substantive question
 unresolved; a timeout, invalid handoff or unfinished assessment is an execution failure.
+
+An **external evidence follow-up** records a question that this source assessment cannot answer:
+for example, the current balance of a credit card, a completed deployment, or the internals of an
+external dependency that are not in the pinned source. It does not block even in strict mode and
+does not establish compliance. Assess still checks the proposed mechanism—for example, whether code
+checks a balance before authorizing a payment. A missing check in that code can be a violation.
+
+The validator must distinguish this scope boundary from unread repository source, a failed read,
+an exhausted inspection budget, or an ambiguous applicable requirement. Those do not become external
+follow-ups just because assessment is difficult; unresolved artifact judgments and execution failures
+retain their normal policy effects. A standard can have an external follow-up and a blocking violation
+or unresolved artifact question at the same time.
 
 - **0:** policy permits continuation; findings or questions may still exist in advisory mode.
 - **1:** the selected policy requires attention.
@@ -100,14 +113,17 @@ from an execution failure; failures retain partial findings without presenting t
 A compact coverage line stays visible. “No concern identified” describes an observation, not verified
 compliance. **Standards and evidence** expands the per-criterion ledger, full unresolved explanations,
 and additional human review focus. **Run details** holds cost, timing, identities and recent history.
+**External follow-ups** is a separate collapsed section. Questions about the same external subject
+and evidence category share one entry linked to every affected standard; the full report retains
+each explanation and cited evidence. These entries are not included in the unresolved-question count.
 The Action summary and artifact bundle retain the detailed assessment and operational diagnostics.
 The comment omits the duplicate file inventory and does not infer resolved findings between runs.
 
 The summary is reader orientation, separate from adherence and enforcement. Only an accepted,
 source-checked narrative is displayed; its opening two sentences appear in the main comment.
 Historical reports can retain human and operational follow-ups in the full report. Current
-artifact-only reviews retain out-of-scope operational nominations in raw audit records without
-turning them into developer action items.
+assessments retain independently classified external evidence limitations as nonblocking follow-ups;
+they do not require developers to prove that an external operation completed before merging.
 
 Only verified binding violations are produced as eligible inline findings by this method; guidance remains in the summary. Historical reports may retain the older behavioral-defect category. The current assessor does not conduct unrelated bug hunting.
 

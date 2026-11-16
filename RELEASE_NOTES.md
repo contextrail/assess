@@ -1,10 +1,6 @@
-## 1.0.0-alpha.1 (2026-11-16)
+## 1.0.0-alpha.2 (2026-11-16)
 
-### ⚠ BREAKING CHANGES
+### Fixes and improvements
 
-* **assess:** rename the standards assessment package and simplify adoption
-
-### Features
-
-* **assess:** rename the standards assessment package and simplify adoption 3059549
+* **assess:** keep external evidence follow-ups nonblockking 8c6e551
 

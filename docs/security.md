@@ -25,6 +25,10 @@ Ordinary MCP retrieval still produces delivery events. Repository identity is wi
 `--repository-attribution` includes the Git-derived host, owner namespace and repository name, not a
 remote URL. An ingestion receipt confirms receipt, not correctness or compliance.
 
+External evidence limitations contribute per-standard category counts to feedback. External subject
+names, suggested actions, explanations and citations stay in the customer's evidence bundle; they
+are not added to the metadata sent to ContextRail.
+
 ## What source the model can inspect
 
 The package fixes the base/head commits and reads source through bounded tools. Supporting unchanged

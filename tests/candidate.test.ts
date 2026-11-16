@@ -249,7 +249,7 @@ describe('candidate observations and focused validation', () => {
         expect(f.state.entries[0]!.result.disposition).toBe('unresolved');
     });
     it.each(['supported_violation', 'missing_evidence', 'ambiguous_rule'] as const)(
-        'excludes operational %s from artifact outcomes and strict enforcement',
+        'does not let an assessor operational label override independent %s',
         (decision) => {
             const f = fixture(),
                 p = candidateProposal(
@@ -286,12 +286,13 @@ describe('candidate observations and focused validation', () => {
                     ),
                 ],
             );
-            expect(f.state.findings).toEqual([]);
-            expect(f.state.followUps).toEqual([]);
-            expect(f.state.entries[0]!.result).toMatchObject({ disposition: 'observed', adherence: null });
+            expect(f.state.findings).toHaveLength(decision === 'supported_violation' ? 1 : 0);
+            expect(f.state.entries[0]!.result.disposition).toBe(
+                decision === 'supported_violation' ? 'evaluated' : 'unresolved',
+            );
             expect(
                 decideExit(f.state.entries, { enforcement: 'strict' }, false, false, f.state.findings).exitCode,
-            ).toBe(0);
+            ).toBe(1);
         },
     );
     it('keeps implementation uncertainty when the same context has an out-of-scope operational concern', () => {
@@ -326,7 +327,7 @@ describe('candidate observations and focused validation', () => {
         expect(f.state.followUps).toEqual([]);
         expect(decideExit(f.state.entries, { enforcement: 'strict' }, false, false, f.state.findings).exitCode).toBe(1);
     });
-    it('does not require validation of an operational receipt to determine artifact disposition', () => {
+    it('requires independent validation before excluding an assessor-labeled operational concern', () => {
         const f = fixture();
         const proposal = candidateProposal(
             {
@@ -343,15 +344,26 @@ describe('candidate observations and focused validation', () => {
             f.ledger,
         );
         projectCandidates(f.state, [proposal], []);
-        expect(f.state.entries[0]!.result).toMatchObject({ disposition: 'observed', adherence: null });
-        expect(proposal.observations![0]!.unknowns).toEqual(['Current run result unavailable.']);
-        expect(f.state.checks[0]).toMatchObject({
-            disposition: 'not_applicable',
-            missingEvidence: '',
-            verified: false,
-        });
-        expect(f.state.entries[0]!.result.explanation).toContain('outside this artifact audit');
+        expect(f.state.entries[0]!.result.disposition).toBe('unresolved');
+        expect(f.state.checks[0]).toMatchObject({ disposition: 'unresolved', verified: false });
         expect(f.state.followUps).toEqual([]);
+        const decision = validateConcern(
+            {
+                decision: 'not_applicable',
+                applicability: 'not_applicable',
+                duty: 'binding',
+                suggestionAccepted: false,
+                reason: 'Current execution receipts are outside artifact assessment.',
+                consequence: '',
+                correction: '',
+                sourceRefs: [],
+            },
+            proposal.observations![0]!,
+            f.ledger,
+        );
+        projectCandidates(f.state, [proposal], [decision]);
+        expect(f.state.entries[0]!.result).toMatchObject({ disposition: 'observed', adherence: null });
+        expect(decideExit(f.state.entries, { enforcement: 'strict' }).exitCode).toBe(0);
     });
     it('keeps a confirmed violation when another obligation has a decisive evidence gap', () => {
         const f = fixture();
@@ -399,5 +411,132 @@ describe('candidate observations and focused validation', () => {
         expect(decideExit(f.state.entries, { enforcement: 'required' }, false, false, f.state.findings).exitCode).toBe(
             1,
         );
+    });
+});
+
+describe('external evidence boundary', () => {
+    function external(f: ReturnType<typeof fixture>, observation: Parameters<typeof validateConcern>[1]) {
+        return validateConcern(
+            {
+                decision: 'external_follow_up',
+                externalEvidence: { kind: 'external_dependency', subject: 'storage-provider@1' },
+                applicability: 'applicable',
+                duty: 'binding',
+                suggestionAccepted: false,
+                reason: 'The external storage implementation is not included in the pinned repository.',
+                consequence: '',
+                correction: 'Inspect storage-provider@1 separately if assurance is needed.',
+                sourceRefs: f.row.sourceRefs,
+            },
+            observation,
+            f.ledger,
+        );
+    }
+    function proposal(f: ReturnType<typeof fixture>) {
+        return candidateProposal(
+            {
+                ...f.input,
+                observations: [
+                    {
+                        ...f.row,
+                        observation: 'Input is passed to the storage provider.',
+                        unknowns: ['The external provider implementation is unavailable.'],
+                    },
+                ],
+            },
+            f.entries,
+            f.ledger,
+        );
+    }
+    it('requires independent boundary validation and never certifies external adherence', () => {
+        const f = fixture(),
+            p = proposal(f);
+        projectCandidates(f.state, [p], []);
+        expect(decideExit(f.state.entries, { enforcement: 'strict' }).exitCode).toBe(1);
+        const d = external(f, p.observations![0]!);
+        projectCandidates(f.state, [p], [d]);
+        expect(f.state.entries[0]!.result).toMatchObject({
+            disposition: 'observed',
+            adherence: null,
+            confidence: null,
+            finding: 'none',
+        });
+        expect(f.state.entries[0]!.result.limitations).toContain(
+            'Outside artifact evidence boundary: storage-provider@1. Not assessed; no compliance conclusion.',
+        );
+        expect(f.state.followUps).toMatchObject([
+            {
+                kind: 'external_evidence',
+                required: false,
+                verified: true,
+                externalEvidence: { subject: 'storage-provider@1' },
+            },
+        ]);
+        expect(decideExit(f.state.entries, { enforcement: 'strict' })).toMatchObject({ exitCode: 0, complete: true });
+        expect(decideExit(f.state.entries, { enforcement: 'strict' }, false, true).exitCode).toBe(2);
+        const restored = revalidateCandidate(p, f.entries, f.ledger);
+        const { observationId: _id, ...saved } = d;
+        const wire = {
+            ...saved,
+            sourceRefs: saved.sourceRefs.map(({ ref, quote, start, end }) => ({ ref, quote, start, end })),
+        };
+        expect(validateConcern(JSON.parse(JSON.stringify(wire)), restored.observations![0]!, f.ledger)).toEqual(d);
+    });
+    it.each(['supported_violation', 'missing_evidence', 'ambiguous_rule'] as const)(
+        'does not suppress a separate %s in the same standard',
+        (decision) => {
+            const f = fixture();
+            const combined = candidateProposal(
+                {
+                    ...f.input,
+                    observations: [
+                        { ...f.row, question: 'External provider?', unknowns: ['Provider internals unavailable.'] },
+                        f.row,
+                    ],
+                },
+                f.entries,
+                f.ledger,
+            );
+            const d = external(f, combined.observations![0]!);
+            const local = validateConcern(
+                {
+                    decision,
+                    applicability: 'applicable',
+                    duty: 'binding',
+                    suggestionAccepted: false,
+                    reason: 'The repository storage path lacks the required size check.',
+                    consequence: 'Oversized input is persisted.',
+                    correction: 'Inspect and enforce the local size bound.',
+                    sourceRefs: f.row.sourceRefs,
+                },
+                combined.observations![1]!,
+                f.ledger,
+            );
+            projectCandidates(f.state, [combined], [d, local]);
+            expect(f.state.followUps).toHaveLength(1);
+            expect(
+                decideExit(f.state.entries, { enforcement: 'strict' }, false, false, f.state.findings).exitCode,
+            ).toBe(1);
+            if (decision === 'supported_violation') expect(f.state.findings).toHaveLength(1);
+            else expect(f.state.entries[0]!.result.disposition).toBe('unresolved');
+        },
+    );
+    it('rejects boundary decisions without source, subject, action or relevant applicability', () => {
+        const f = fixture(),
+            p = proposal(f),
+            o = p.observations![0]!;
+        const { observationId: _id, ...valid } = external(f, o);
+        const wire = { ...valid, sourceRefs: f.row.sourceRefs };
+        expect(() => validateConcern(wire, o, f.ledger)).not.toThrow();
+        for (const patch of [
+            { externalEvidence: null },
+            { sourceRefs: [] },
+            { correction: '' },
+            { externalEvidence: { kind: 'external_dependency', subject: ' ' } },
+            { applicability: 'not_applicable' },
+            { suggestionAccepted: true },
+            { decision: 'missing_evidence' },
+        ])
+            expect(() => validateConcern({ ...wire, ...patch }, o, f.ledger)).toThrow();
     });
 });

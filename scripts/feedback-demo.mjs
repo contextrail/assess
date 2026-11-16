@@ -113,6 +113,7 @@ try {
                         name: 'submit_verification',
                         input: {
                             decision: 'refuted',
+                            externalEvidence: null,
                             applicability: 'applicable',
                             reason: 'SENTINEL_LOCAL_VERIFICATION_C5',
                             duty: 'binding',

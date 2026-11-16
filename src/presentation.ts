@@ -532,11 +532,11 @@ export function renderReaderGuidance(input: unknown): string {
             'No independently checked narrative summary is available. The prepared file inventory below still describes the comparison.',
         );
     }
-    const followUps = objects(state.followUps);
+    const followUps = objects(state.followUps).filter((item) => item.kind !== 'external_evidence');
     if (followUps.length) {
         lines.push(
             '#### Human and operational follow-ups',
-            'These remain separate from artifact adherence. Pending mandatory operational gates still prevent a claim of overall completion.',
+            'These remain separate from artifact adherence. An assessment outcome does not establish that operational duties were completed.',
         );
         for (const item of followUps) {
             const kind = item.kind === 'operational_check' ? 'Operational check' : 'Human check';
@@ -558,7 +558,44 @@ export function renderReaderGuidance(input: unknown): string {
             );
         }
     }
+    const external = renderExternalFollowUps(state, false);
+    if (external) lines.push(external);
     return lines.join('\n\n');
+}
+/** Group a shared external evidence boundary without merging the underlying assessment records. */
+function renderExternalFollowUps(state: Record<string, unknown>, compact: boolean): string {
+    const groups = new Map<string, Record<string, unknown>[]>();
+    for (const item of objects(state.followUps)) {
+        if (item.kind !== 'external_evidence' || item.verified !== true || item.required !== false) continue;
+        const external = object(item.externalEvidence);
+        const key = JSON.stringify([external.kind, string(external.subject).trim()]);
+        groups.set(key, [...(groups.get(key) ?? []), item]);
+    }
+    if (!groups.size) return '';
+    const lines = [
+        'Outside this source assessment; nonblocking in every enforcement mode. These are evidence limitations, not violations or proof of compliance.',
+    ];
+    for (const items of groups.values()) {
+        const external = object(items[0]!.externalEvidence);
+        const subject = markdownText(external.subject, 500);
+        const kind = markdownText(string(external.kind).replaceAll('_', ' '));
+        const criteria = findingCriteria(
+            items.map((item) => ({ assessmentIds: [item.assessmentId] })),
+            objects(state.entries),
+        );
+        lines.push(`- **${subject}.** ${kind}. Criteria: ${criteria}.`);
+        const accounts = compact
+            ? [...new Set(items.map((item) => string(item.action)))].map((action) => briefText(action, 1))
+            : items.map(
+                  (item) =>
+                      `${markdownText(item.explanation, 1200)} **Follow-up:** ${markdownText(item.action, 1200)}${sourceLinks(item.sourceRefs, {})}`,
+              );
+        lines.push(...accounts.map((account) => `  ${account}`));
+    }
+    const heading = `External follow-ups (${groups.size})`;
+    return compact
+        ? `<details>\n<summary>${heading}</summary>\n\n${lines.join('\n\n')}\n\n</details>`
+        : `#### ${heading}\n\n${lines.join('\n\n')}`;
 }
 function renderChangeSummary(input: unknown): string {
     const state = object(input),
@@ -629,9 +666,17 @@ export function assessmentProgressLabel(status: string, focused = false): string
             : 'Nominated concerns checked';
     return verificationLabels[status] ?? 'Not checked';
 }
-function criterionOutcome(result: Record<string, unknown>, accepted: boolean): string {
+export function externalEvidenceAssessmentIds(input: unknown): Set<string> {
+    return new Set(
+        objects(object(input).followUps)
+            .filter((item) => item.kind === 'external_evidence' && item.verified === true && item.required === false)
+            .map((item) => string(item.assessmentId)),
+    );
+}
+function criterionOutcome(result: Record<string, unknown>, accepted: boolean, externalEvidence: boolean): string {
     const disposition = string(result.disposition);
-    if (disposition === 'observed') return 'Observed / no concern identified';
+    if (disposition === 'observed')
+        return externalEvidence ? 'Observed / external evidence limitation' : 'Observed / no concern identified';
     if (disposition === 'not_applicable') return accepted ? 'Not applicable' : 'Proposed not applicable';
     if (disposition === 'unresolved') return 'Unresolved';
     if (disposition === 'not_evaluated') return 'Not evaluated';
@@ -663,6 +708,7 @@ function criterionRow(
     progress: ReturnType<typeof assessmentCoverage>,
     verified: Record<string, unknown>[],
     focused = false,
+    externalEvidence = false,
 ): string {
     const result = object(entry.result);
     const status = progress.entries.find((p) => p.assessmentId === entry.assessmentId)?.status ?? 'unexamined';
@@ -672,7 +718,13 @@ function criterionRow(
     );
     const count = linked.length ? `[${linked.length}](#governed-findings)` : '0';
     const label = assessmentProgressLabel(status, focused);
-    return `| ${markdownText(entry.nodeId, 500)} @ ${markdownText(entry.version, 20)} | ${criterionOutcome(result, accepted)} | ${label} | ${count} | ${markdownText(criterionNote(result, status, accepted), 200)} |`;
+    return `| ${markdownText(entry.nodeId, 500)} @ ${markdownText(entry.version, 20)} | ${criterionOutcome(result, accepted, externalEvidence)} | ${label} | ${count} | ${markdownText(criterionNote(result, status, accepted), 200)} |`;
+}
+function observationCounts(state: Record<string, unknown>, entries: Record<string, unknown>[]) {
+    const externalIds = externalEvidenceAssessmentIds(state);
+    const observed = entries.filter((entry) => object(entry.result).disposition === 'observed');
+    const external = observed.filter((entry) => externalIds.has(string(entry.assessmentId))).length;
+    return { externalIds, external, withoutConcern: observed.length - external };
 }
 function findingCriteria(accounts: Record<string, unknown>[], entries: Record<string, unknown>[]): string {
     const ids = [...new Set(accounts.flatMap((a) => (Array.isArray(a.assessmentIds) ? a.assessmentIds : [])))];
@@ -760,17 +812,18 @@ export function renderAssessmentReport(input: unknown, options: PresentationOpti
     lines.push(renderReaderGuidance(state));
     lines.push(...renderGovernedFindings(entries, verified, progress));
     const count = (d: string) => entries.filter((e) => object(e.result).disposition === d).length;
+    const observed = observationCounts(state, entries);
     const focusedCoverage = object(state.concernValidation).scope === 'nominated_concerns';
     const criterionRows = entries.map((entry) =>
-        criterionRow(entry, progress, verified, object(state.concernValidation).scope === 'nominated_concerns'),
+        criterionRow(entry, progress, verified, focusedCoverage, observed.externalIds.has(string(entry.assessmentId))),
     );
     lines.push(
         '#### Assessment coverage',
-        `Assessed ${progress.assessed}/${progress.total}; awaiting verification ${progress.awaitingVerification}; needs reassessment ${progress.needsReassessment}; ${focusedCoverage ? 'contexts with nominated concerns checked' : 'verified'} ${progress.verified}; unexamined ${progress.unexamined}. Final outcomes: evaluated ${count('evaluated')}, observed ${count('observed')}, not applicable ${count('not_applicable')}, unresolved ${count('unresolved')}, not evaluated ${count('not_evaluated')}.`,
+        `Assessed ${progress.assessed}/${progress.total}; awaiting verification ${progress.awaitingVerification}; needs reassessment ${progress.needsReassessment}; ${focusedCoverage ? 'contexts with nominated concerns checked' : 'verified'} ${progress.verified}; unexamined ${progress.unexamined}. Final outcomes: evaluated ${count('evaluated')}, observed ${count('observed')} (${observed.withoutConcern} with no concern identified; ${observed.external} with external evidence limitations), not applicable ${count('not_applicable')}, unresolved ${count('unresolved')}, not evaluated ${count('not_evaluated')}.`,
         '| Criterion / version | Outcome | Verification | Verified findings | Note |\n| --- | --- | --- | --- | --- |\n' +
             (criterionRows.join('\n') ||
                 '| No governed criteria recorded | Unavailable | Not checked | 0 | No assessment scope is available. |'),
-        'Each original criterion is listed in its recorded order. Observed means no concern was identified by the assessor; it is not independently verified compliance. Checked means independently reviewed, including confirmed evidence gaps; it does not mean the requirement is satisfied. Awaiting verification is not acceptance. Assessed counts use complete canonical assessment handoffs for this fixed comparison. Saved proposals are separate unfinished work, not unexamined criteria or verified outcomes; final outcome labels retain the canonical disposition.',
+        'Each original criterion is listed in its recorded order. Observed entries distinguish no concern identified from external evidence limitations; neither is independently verified compliance. Checked means independently reviewed, including confirmed evidence gaps; it does not mean the requirement is satisfied. Awaiting verification is not acceptance. Assessed counts use complete canonical assessment handoffs for this fixed comparison. Saved proposals are separate unfinished work, not unexamined criteria or verified outcomes; final outcome labels retain the canonical disposition.',
     );
     const concerns = object(state.concernValidation);
     if (concerns.scope === 'nominated_concerns' && number(concerns.expected) && number(concerns.validated))
@@ -794,6 +847,7 @@ export function renderAssessmentComment(input: unknown, options: PresentationOpt
     const verified = objects(state.findings).filter((finding) => finding.verified === true);
     const questions = entries.filter((entry) => object(entry.result).disposition === 'unresolved');
     const count = (value: string) => entries.filter((entry) => object(entry.result).disposition === value).length;
+    const observed = observationCounts(state, entries);
     const exit = options.reviewExit ?? object(state.decision).exitCode ?? object(state.decision).reviewExit;
     const failed = Boolean(
         options.failedStage || exit === 2 || (execution.stopReason && execution.stopReason !== 'finished'),
@@ -847,11 +901,19 @@ export function renderAssessmentComment(input: unknown, options: PresentationOpt
             );
         }
     }
+    const externalFollowUps = renderExternalFollowUps(state, true);
+    if (externalFollowUps) lines.push(externalFollowUps);
     lines.push(
-        `${progress.assessed}/${progress.total} standards assessed · ${count('observed')} with no concern identified · ${questions.length} unresolved${pending ? ` · ${pending} awaiting assessment or verification` : ''}${count('not_applicable') ? ` · ${count('not_applicable')} not applicable` : ''}`,
+        `${progress.assessed}/${progress.total} standards assessed · ${observed.withoutConcern} with no concern identified${observed.external ? ` · ${observed.external} with external evidence limitations` : ''} · ${questions.length} unresolved${pending ? ` · ${pending} awaiting assessment or verification` : ''}${count('not_applicable') ? ` · ${count('not_applicable')} not applicable` : ''}`,
     );
     const rows = entries.map((entry) =>
-        criterionRow(entry, progress, verified, object(state.concernValidation).scope === 'nominated_concerns'),
+        criterionRow(
+            entry,
+            progress,
+            verified,
+            object(state.concernValidation).scope === 'nominated_concerns',
+            observed.externalIds.has(string(entry.assessmentId)),
+        ),
     );
     lines.push(
         '<details>\n<summary>Standards and evidence</summary>\n\n' +

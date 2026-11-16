@@ -182,6 +182,7 @@ function completeModelFields(name: string, input: unknown): unknown {
             | undefined;
         return {
             decision: entry?.disposition === 'accept' ? 'supported_violation' : 'missing_evidence',
+            externalEvidence: null,
             reason: entry?.reason ?? 'No supported decision.',
             duty: 'binding',
             applicability: 'applicable',
@@ -194,6 +195,7 @@ function completeModelFields(name: string, input: unknown): unknown {
             sourceRefs: entry?.citations ?? [],
         };
     }
+    if (name === 'submit_verification' && 'decision' in value) return { externalEvidence: null, ...value };
     return input;
 }
 
@@ -2474,8 +2476,9 @@ describe('one coherent investigation and one independent check', () => {
         expect(result.state.verification.verified).toBe(0);
         expect(result.state.phases.map((p) => p.phase)).toEqual(['assess']);
     });
-    function mixedWire(prepared: FixturePrepared) {
+    function mixedWire(prepared: FixturePrepared, external = false, localDecision?: 'refuted') {
         const wire = fixtureWire(prepared, 'openrouter', {
+            concernDecision: localDecision,
             mutate(phase, payload) {
                 if (phase !== 'assess') return;
                 const native = completeModelFields('submit_assessments', payload) as z.infer<
@@ -2506,16 +2509,29 @@ describe('one coherent investigation and one independent check', () => {
                 [
                     {
                         name: 'submit_verification',
-                        input: {
-                            decision: 'missing_evidence',
-                            applicability: 'applicable',
-                            duty: 'binding',
-                            suggestionAccepted: false,
-                            reason: 'Inspect the external selected package version.',
-                            consequence: 'The external behavior cannot be established.',
-                            correction: 'Inspect the external selected package version.',
-                            sourceRefs: [],
-                        },
+                        input: modelSelectors(
+                            {
+                                decision: external ? 'external_follow_up' : 'missing_evidence',
+                                externalEvidence: external
+                                    ? { kind: 'external_dependency', subject: 'storage-provider@1' }
+                                    : null,
+                                applicability: 'applicable',
+                                duty: 'binding',
+                                suggestionAccepted: false,
+                                reason: 'Inspect the external selected package version.',
+                                consequence: 'The external behavior cannot be established.',
+                                correction: 'Inspect the external selected package version.',
+                                sourceRefs: external
+                                    ? [
+                                          submissions(prepared).find(
+                                              (entry) =>
+                                                  entry.assessmentId === request.payload.observation!.assessmentId,
+                                          )!.citations[1],
+                                      ]
+                                    : [],
+                            },
+                            prepared,
+                        ),
                     },
                 ],
                 100,
@@ -2596,6 +2612,78 @@ describe('one coherent investigation and one independent check', () => {
         expect(report.runner).toMatchObject({ reviewExit: 1, exitCode: 1 });
         expect(report.completion).toBe('incomplete');
     });
+    it('finishes strict assessment with independently classified external limitations without compliance scores', async () => {
+        vi.stubEnv('OPENROUTER_API_KEY', 'test-key');
+        const prepared = await createPreparedFixture();
+        directories.push(prepared.state.artifact.repository);
+        const result = await runAssessment({
+            ...fixtureOptions(prepared),
+            policy: { enforcement: 'strict' },
+            fetch: mixedWire(prepared, true, 'refuted'),
+        });
+        expect(
+            result.state.execution.stopReason,
+            readFileSync(join(result.directory, 'diagnostics.jsonl'), 'utf8'),
+        ).toBe('finished');
+        expect(result.state.decision).toMatchObject({ exitCode: 0, complete: true });
+        expect(result.state.followUps).toHaveLength(2);
+        expect(result.state.findings).toHaveLength(0);
+        for (const entry of result.state.entries)
+            expect(entry.result).toMatchObject({ disposition: 'observed', adherence: null, confidence: null });
+        expect(() => validatePublicationArtifacts(result.directory, result.state, result.statePath)).not.toThrow();
+        const report = projectAssessmentReport(result.state);
+        expect(report.completion).toBe('complete');
+        expect(report.runner).toMatchObject({ reviewExit: 0, exitCode: 0 });
+        expect(report.outcomes.every((entry) => !entry.blocking && entry.disposition === 'observed')).toBe(true);
+        expect(JSON.stringify(report)).not.toContain('storage-provider@1');
+    });
+    it('restores completed external decisions while unfinished local verification remains blocking', async () => {
+        vi.stubEnv('OPENROUTER_API_KEY', 'test-key');
+        const prepared = await createPreparedFixture();
+        directories.push(prepared.state.artifact.repository);
+        const wire = mixedWire(prepared, true);
+        const first = await runAssessment({
+            ...fixtureOptions(prepared),
+            policy: { enforcement: 'strict' },
+            fetch: (url, init) => {
+                const request = phaseRequest(JSON.parse(init!.body as string), prepared);
+                return request.phase === 'verify' &&
+                    request.payload.observation?.concern.claim !== 'External package evidence is missing.'
+                    ? Promise.resolve(stoppedResponse())
+                    : wire(url, init);
+            },
+        });
+        expect(first.state.decision?.exitCode).toBe(2);
+        expect(first.state.followUps, readFileSync(join(first.directory, 'diagnostics.jsonl'), 'utf8')).toHaveLength(2);
+        const loaded = loadAssessmentCheckpoint(first.directory, {
+            artifact: prepared.state.artifact,
+            reviewerId: prepared.state.requestedReviewerId,
+        });
+        const resumedWire = mixedWire(loaded.prepared, true);
+        const repeatedExternal = vi.fn();
+        const resumed = await runAssessment({
+            ...fixtureOptions(loaded.prepared),
+            policy: { enforcement: 'strict' },
+            resume: loaded.checkpoint,
+            fetch: (url, init) => {
+                const request = phaseRequest(JSON.parse(init!.body as string), loaded.prepared);
+                if (request.payload.observation?.concern.claim === 'External package evidence is missing.')
+                    repeatedExternal();
+                return resumedWire(url, init);
+            },
+        });
+        expect(repeatedExternal).not.toHaveBeenCalled();
+        expect(resumed.state.execution.stopReason).toBe('finished');
+        expect(resumed.state.verification).toMatchObject({ verified: 4, complete: true });
+        expect(resumed.state.decision).toMatchObject({ exitCode: 1, complete: true });
+        expect(resumed.state.followUps).toEqual(first.state.followUps);
+        expect(resumed.state.findings).toHaveLength(1);
+        expect(resumed.state.findings[0]!.assessmentIds).toHaveLength(2);
+        const report = projectAssessmentReport(resumed.state);
+        expect(report.completion).toBe('complete');
+        expect(report.outcomes.every((entry) => entry.blocking && entry.finding === 'binding_violation')).toBe(true);
+        expect(() => validatePublicationArtifacts(resumed.directory, resumed.state, resumed.statePath)).not.toThrow();
+    });
     it('does not semantically rerun a rejected assessment or invoke a second verifier', async () => {
         vi.stubEnv('OPENROUTER_API_KEY', 'test-key');
         const prepared = await preparedFixture();
@@ -2621,49 +2709,52 @@ describe('one coherent investigation and one independent check', () => {
         expect(result.state.entries.every((entry) => entry.result.disposition === 'unresolved')).toBe(true);
         expect(result.state.decision?.exitCode).toBe(0);
     });
-    it('rejects a sealed pre-artifact-boundary assessment before making another provider call', async () => {
-        vi.stubEnv('OPENROUTER_API_KEY', 'test-key');
-        const prepared = await createPreparedFixture();
-        const wire = fixtureWire(prepared);
-        const failed = await runAssessment({
-            ...fixtureOptions(prepared),
-            fetch: (url, init) =>
-                phaseRequest(JSON.parse(String(init?.body)), prepared).phase === 'verify'
-                    ? Promise.resolve(new Response('{}', { status: 503 }))
-                    : wire(url, init),
-        });
-        // Model a valid older checkpoint, rather than an in-memory tampering rejection.
-        const phaseHashes = new Map<string, string>();
-        for (const phase of failed.state.phases) {
-            phase.configuration.promptVersion = 'candidate-observation-v1';
-            for (const input of phase.inputRefs)
-                if (input.ref.startsWith('phase:')) input.hash = phaseHashes.get(input.ref)!;
-            phaseHashes.set(`phase:${phase.phase}:${phase.workUnitId}:${phase.attempt}`, digest(phase));
-            writeFileSync(
-                join(failed.directory, `phases/${phase.phase}-${phase.workUnitId}-${phase.attempt}.json`),
-                JSON.stringify(phase),
-            );
-        }
-        writeFileSync(failed.statePath, JSON.stringify(failed.state));
-        const manifestPath = join(failed.directory, 'manifest.json');
-        const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-        for (const file of Object.keys(manifest.files))
-            manifest.files[file] =
-                'sha256:' +
-                createHash('sha256')
-                    .update(readFileSync(join(failed.directory, file)))
-                    .digest('hex');
-        writeFileSync(manifestPath, JSON.stringify(manifest));
-        const loaded = loadAssessmentCheckpoint(failed.directory, {
-            artifact: prepared.state.artifact,
-            reviewerId: prepared.state.requestedReviewerId,
-        });
-        const fetch = vi.fn(wire);
-        await expect(
-            runAssessment({ ...fixtureOptions(loaded.prepared), resume: loaded.checkpoint, fetch }),
-        ).rejects.toThrow('resume_method_changed_start_new_assessment');
-        expect(fetch).not.toHaveBeenCalled();
-    });
+    it.each(['candidate-observation-v1', 'candidate-observation-v2'])(
+        'rejects sealed older method %s before making another provider call',
+        async (version) => {
+            vi.stubEnv('OPENROUTER_API_KEY', 'test-key');
+            const prepared = await createPreparedFixture();
+            const wire = fixtureWire(prepared);
+            const failed = await runAssessment({
+                ...fixtureOptions(prepared),
+                fetch: (url, init) =>
+                    phaseRequest(JSON.parse(String(init?.body)), prepared).phase === 'verify'
+                        ? Promise.resolve(new Response('{}', { status: 503 }))
+                        : wire(url, init),
+            });
+            // Model a valid older checkpoint, rather than an in-memory tampering rejection.
+            const phaseHashes = new Map<string, string>();
+            for (const phase of failed.state.phases) {
+                phase.configuration.promptVersion = version;
+                for (const input of phase.inputRefs)
+                    if (input.ref.startsWith('phase:')) input.hash = phaseHashes.get(input.ref)!;
+                phaseHashes.set(`phase:${phase.phase}:${phase.workUnitId}:${phase.attempt}`, digest(phase));
+                writeFileSync(
+                    join(failed.directory, `phases/${phase.phase}-${phase.workUnitId}-${phase.attempt}.json`),
+                    JSON.stringify(phase),
+                );
+            }
+            writeFileSync(failed.statePath, JSON.stringify(failed.state));
+            const manifestPath = join(failed.directory, 'manifest.json');
+            const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+            for (const file of Object.keys(manifest.files))
+                manifest.files[file] =
+                    'sha256:' +
+                    createHash('sha256')
+                        .update(readFileSync(join(failed.directory, file)))
+                        .digest('hex');
+            writeFileSync(manifestPath, JSON.stringify(manifest));
+            const loaded = loadAssessmentCheckpoint(failed.directory, {
+                artifact: prepared.state.artifact,
+                reviewerId: prepared.state.requestedReviewerId,
+            });
+            const fetch = vi.fn(wire);
+            await expect(
+                runAssessment({ ...fixtureOptions(loaded.prepared), resume: loaded.checkpoint, fetch }),
+            ).rejects.toThrow('resume_method_changed_start_new_assessment');
+            expect(fetch).not.toHaveBeenCalled();
+        },
+    );
     it('resumes a sealed failed verifier without repeating the complete investigation and rejects mutated checkpoints', async () => {
         vi.stubEnv('OPENROUTER_API_KEY', 'test-key');
         const prepared = await createPreparedFixture();
@@ -2696,9 +2787,9 @@ describe('one coherent investigation and one independent check', () => {
         });
         expect(seen).toEqual(['verify', 'verify']);
         expect(
-            resumed.state.phases.every((phase) => phase.configuration.promptVersion === 'candidate-observation-v2'),
+            resumed.state.phases.every((phase) => phase.configuration.promptVersion === 'candidate-observation-v3'),
         ).toBe(true);
-        expect(projectAssessmentReport(resumed.state).methodVersion).toBe('candidate-adherence-v2');
+        expect(projectAssessmentReport(resumed.state).methodVersion).toBe('candidate-adherence-v3');
         expect(resumed.state.verification.verified).toBe(2);
         expect(resumed.state.assessmentStatus).toBe('complete');
         expect(resumed.state.execution.stopReason).toBe('finished');

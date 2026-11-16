@@ -365,7 +365,13 @@ export type AssessmentFinding = {
     proposedReplacement?: z.infer<typeof replacementSchema> & { verified: boolean };
     verified: boolean;
 };
-export type AssessmentFollowUp = Omit<z.infer<typeof followUpSchema>, 'passage' | 'sourceRefs'> & {
+export type AssessmentFollowUp = Omit<z.infer<typeof followUpSchema>, 'kind' | 'passage' | 'sourceRefs'> & {
+    // Only independent concern projection creates external evidence follow-ups.
+    kind: 'human_check' | 'operational_check' | 'external_evidence';
+    externalEvidence?: {
+        kind: 'external_dependency' | 'operational_state' | 'business_record';
+        subject: string;
+    };
     assessmentId: string;
     passage: Citation;
     sourceRefs: Citation[];

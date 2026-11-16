@@ -68,13 +68,15 @@ The assessment boundary is the proposed artifact, not general operational assura
 check relates a changed behavior to a governing obligation. Missing evidence makes that artifact
 judgment unresolved only when it is decisive for the claim under review. Source-visible defects and
 contradictions remain findings without requiring runtime reproduction. The current PR author's process, CI status and execution of external operations are not assessment subjects.
-Out-of-scope operational nominations remain in the raw audit record but cannot create findings,
-unresolved artifact outcomes or actionable follow-ups. Verification challenges applicability and proportionality
+Independent validation separates irrelevant operational questions from relevant external evidence
+limitations. The latter become nonblocking follow-ups with their governing version and boundary evidence,
+not compliance scores. An assessor's scope label alone cannot clear a concern. Verification challenges applicability and proportionality
 as well as supporting evidence, including whether a proposed follow-up actually conceals a code defect.
 
 For configurable code, judge the source-controlled selector, validation, defaults and authority over
-inputs. An unknown deployed value alone is outside the audit. Missing source for a newly
-selected executable can still leave a specific artifact behavior unresolved. Prior reviewer requests
+inputs. An unknown deployed value alone is outside the audit. Unavailable external dependency internals
+are a recorded external limitation. Missing or unread implementation within the pinned repository remains
+an unresolved artifact question; source-visible violations still require correction. Prior reviewer requests
 are reassessed against this boundary; they do not become additional governing requirements.
 
 Assessment produces observations and nominates concerns against the original pinned standards.
@@ -92,7 +94,7 @@ history remain available as context, not additional governing authority.
 Each verifier receives the governing publication, reviewer constraints, nominated observation and cited
 source fragments. It can read additional supporting code. Repository text cannot waive governing requirements.
 Code extracts exact citations, generates identities and derives policy outcomes. Decisions and observations
-remain in sealed local artifacts; metadata feedback identifies this method as `candidate-adherence-v2`.
+remain in sealed local artifacts; metadata feedback identifies this method as `candidate-adherence-v3`.
 
 If assessment supplies a change summary, a separate bounded summary session checks its evidence.
 An unavailable or unsupported summary is omitted without invalidating completed standards results.

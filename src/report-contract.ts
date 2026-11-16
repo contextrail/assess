@@ -85,6 +85,14 @@ export const reviewReportInputSchema = z
                     confidence: z.union([z.literal(1), z.literal(2), z.literal(3), z.null()]),
                     finding: z.enum(['none', 'binding_violation', 'behavioral_defect', 'guidance_departure']),
                     blocking: z.boolean().nullable(),
+                    // Counts only: the external subject, source and explanations stay in the customer's bundle.
+                    externalEvidence: z
+                        .strictObject({
+                            external_dependency: integer,
+                            operational_state: integer,
+                            business_record: integer,
+                        })
+                        .optional(),
                 }),
             )
             .max(5000),

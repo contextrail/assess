@@ -17,7 +17,12 @@ import { readFile, mkdir, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { generateText, tool, jsonSchema, zodSchema } from 'ai';
 import { z } from 'zod';
-import { assessmentCoverage, assessmentProgressLabel, renderReaderGuidance } from './presentation.js';
+import {
+    assessmentCoverage,
+    assessmentProgressLabel,
+    externalEvidenceAssessmentIds,
+    renderReaderGuidance,
+} from './presentation.js';
 import {
     validateChangeSummary,
     changeSummarySelectionSchema,
@@ -307,7 +312,7 @@ function restoreCheckpoint(
             throw new Error('resume_checkpoint_changed');
         const old = options.resume.state;
         if (
-            old.phases.some((p) => p.phase === 'assess' && p.configuration.promptVersion !== 'candidate-observation-v2')
+            old.phases.some((p) => p.phase === 'assess' && p.configuration.promptVersion !== 'candidate-observation-v3')
         )
             throw Error('resume_method_changed_start_new_assessment');
         if (
@@ -576,7 +581,7 @@ async function persistPartialAssessment<T>(session: PhaseRuntime<T>, progress: {
             model: models.assess.model,
             promptHash: digest(instructions),
             kind: 'partial_assessment_progress',
-            promptVersion: 'candidate-observation-v2',
+            promptVersion: 'candidate-observation-v3',
         },
         usageRefs: phaseCalls.map((call) => `call:${call}`),
         output: {
@@ -1297,7 +1302,7 @@ async function persistPhaseResult<T>(session: PhaseRuntime<T>, failure: unknown)
                 ? { kind: phase === 'assess' ? 'partial_assessment_progress' : 'partial_verification_progress' }
                 : {}),
             modelIdentifiers: session.identifiers.snapshot(),
-            promptVersion: 'candidate-observation-v2',
+            promptVersion: 'candidate-observation-v3',
             maxPhaseCalls: phase === 'assess' ? 60 : 12,
             maxSourceToolsPerResponse: 50,
             validationConcurrency: 2,
@@ -1433,6 +1438,17 @@ function artifactPrContext(context: PrContext | null) {
     const { observedChecks: _observedChecks, ...artifactContext } = context;
     return artifactContext;
 }
+const artifactEvidenceBoundary = {
+    available:
+        'Pinned repository source, diff, supplied publications and prepared evidence. Read repository implementation beyond the diff when needed.',
+    external: [
+        'External dependency internals not supplied in the repository',
+        'Live operational state or execution receipts',
+        'Business records outside the supplied artifacts',
+    ],
+    incompleteWork:
+        'Unread or paged source, tool failures, budgets and ambiguous requirements are not external evidence exemptions.',
+};
 function baseAssessmentPayload(run: AssessmentRuntime) {
     return {
         reviewer: run.state.reviewer,
@@ -1444,6 +1460,7 @@ function baseAssessmentPayload(run: AssessmentRuntime) {
         repositoryInstructions: run.repositoryInstructions,
         changedFiles: run.prepared.state.changes,
         sourceLimits: run.source.limits,
+        artifactEvidenceBoundary,
     };
 }
 async function prepareRunEvidence(run: AssessmentRuntime) {
@@ -1576,6 +1593,7 @@ async function verifyRun(run: AssessmentRuntime, assessments: AssessmentProposal
             decision = validateConcern(
                 {
                     decision: saved.decision,
+                    externalEvidence: saved.externalEvidence,
                     reason: saved.reason,
                     duty: saved.duty,
                     suggestionAccepted: saved.suggestionAccepted,
@@ -1599,6 +1617,7 @@ async function verifyRun(run: AssessmentRuntime, assessments: AssessmentProposal
                     prContext: artifactPrContext(run.prContext),
                     publication: run.material[entry.assessmentId],
                     observation,
+                    artifactEvidenceBoundary,
                     governingEvidence: {
                         evidence: [modelEvidence(ledger.records[observation.passage.ref]!)],
                         selectedPassage: {
@@ -1869,6 +1888,11 @@ function markdownReport(state: AssessmentState) {
     const coverage = assessmentCoverage(state);
     const progressLabel = (assessmentId: string) => {
         const progress = coverage.entries.find((p) => p.assessmentId === assessmentId);
+        if (
+            externalEvidenceAssessmentIds(state).has(assessmentId) &&
+            state.entries.find((entry) => entry.assessmentId === assessmentId)?.result.disposition === 'observed'
+        )
+            return 'Observed with an independently classified external evidence limitation; external adherence was not assessed.';
         return assessmentProgressLabel(
             progress?.status ?? 'unexamined',
             state.concernValidation?.scope === 'nominated_concerns',

@@ -61,6 +61,61 @@ const state = {
     },
 };
 describe('governed presentation', () => {
+    it('distinguishes observed external limitations from no-concern observations once per criterion', () => {
+        const followUp = {
+            assessmentId: 'criterion',
+            kind: 'external_evidence',
+            verified: true,
+            required: false,
+            externalEvidence: { kind: 'external_dependency', subject: 'vendor/action@pinned' },
+            explanation: 'External implementation is outside the pinned source.',
+            action: 'Inspect separately.',
+            sourceRefs: [],
+        };
+        const input = {
+            ...state,
+            findings: [],
+            entries: state.entries.map((entry) => ({
+                ...entry,
+                result: { disposition: 'observed', finding: 'none', explanation: 'Recorded observation.' },
+            })),
+            followUps: [followUp, followUp, { ...followUp, assessmentId: 'gap', verified: false }],
+        };
+        for (const body of [renderAssessmentComment(input), renderAssessmentReport(input)]) {
+            expect(body).toContain('1 with no concern identified');
+            expect(body).toContain('1 with external evidence limitations');
+            expect(body.match(/Observed \/ external evidence limitation/g)).toHaveLength(1);
+            expect(body.match(/Observed \/ no concern identified/g)).toHaveLength(1);
+            expect(body).not.toContain('2 with no concern identified');
+        }
+    });
+    it('collapses a shared external evidence boundary across standards without hiding artifact gaps or findings', () => {
+        const followUps = ['criterion', 'gap'].map((assessmentId) => ({
+            assessmentId,
+            kind: 'external_evidence',
+            required: false,
+            verified: true,
+            externalEvidence: { kind: 'external_dependency', subject: 'vendor/action@pinned' },
+            explanation: `External source unavailable for ${assessmentId}`,
+            action: 'Inspect the pinned external implementation if needed.',
+            sourceRefs: [],
+        }));
+        const input = { ...state, followUps };
+        const comment = renderAssessmentComment(input);
+        expect(comment.match(/\*\*vendor\/action&#64;pinned\./g)).toHaveLength(1);
+        expect(comment).toContain('<summary>External follow-ups (1)</summary>');
+        expect(comment).toContain('nonblocking in every enforcement mode');
+        expect(comment).toContain('Restore the accepted field');
+        expect(comment).toContain('Runtime evidence is unavailable');
+        expect(comment).toContain('context\\://engineering/contract');
+        expect(comment).toContain('context\\://engineering/evidence');
+        const full = renderAssessmentReport(input);
+        for (const item of followUps) expect(full).toContain(item.explanation);
+        expect(full).not.toContain('Pending mandatory operational gates still prevent');
+        expect(renderAssessmentComment({ ...state, followUps: [{ ...followUps[0], verified: false }] })).not.toContain(
+            'External follow-ups',
+        );
+    });
     it.each(['advisory', 'required', 'strict'])('shows %s policy without hiding evidence gaps', (enforcement) => {
         const input = {
             ...state,
@@ -760,7 +815,7 @@ describe('reader guidance separate from adherence', () => {
             expect(body).toContain('Operational check: mandatory — pending');
             expect(body).toContain('engineering/contract &#64; 1');
             expect(body).toContain('github/workflows/ci');
-            expect(body).toContain('Pending mandatory operational gates');
+            expect(body).toContain('An assessment outcome does not establish that operational duties were completed.');
         }
     });
     it('hides rejected summaries and distinguishes unverified follow-up proposals', () => {
