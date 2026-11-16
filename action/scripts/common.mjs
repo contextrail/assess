@@ -1,0 +1,94 @@
+import process from 'node:process';
+import { error as logError } from 'node:console';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+export const e = process.env;
+export const read = (file) => {
+    try {
+        return JSON.parse(readFileSync(file, 'utf8'));
+    } catch {
+        return null;
+    }
+};
+export const write = (file, value) => writeFileSync(file, JSON.stringify(value, null, 2), { mode: 0o600 });
+export const output = (key, value) => {
+    if (String(value).includes('\n') || String(value).includes('\r')) throw new Error('invalid_output');
+    appendFileSync(e.GITHUB_OUTPUT, `${key}=${value}\n`);
+};
+export const fail = (code) => {
+    throw new Error(code);
+};
+export const config = () => read(join(e.ASSESS_ROOT, 'config.json')) ?? fail('configuration_unavailable');
+// Subprocesses receive an allowlist, never ambient credentials, npm/Git config or CLI policy overrides.
+export const runtimeEnvironment = () =>
+    Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'SYSTEMROOT'].filter((key) => e[key]).map((key) => [key, e[key]]));
+export const gitEnvironment = () => ({
+    ...runtimeEnvironment(),
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_ATTR_NOSYSTEM: '1',
+    GIT_NO_REPLACE_OBJECTS: '1',
+    GIT_NO_LAZY_FETCH: '1',
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_OPTIONAL_LOCKS: '0',
+});
+export const sha = (value) => /^[a-f0-9]{40}$/.test(value ?? '');
+export function eligible(pr, c) {
+    const checks = {
+        requested_pr_number: pr?.number === c.pr,
+        target_branch: !c.baseBranch || pr?.base?.ref === c.baseBranch,
+        base_repository: pr?.base?.repo?.full_name === c.repository,
+        base_commit: sha(pr?.base?.sha),
+        head_commit: sha(pr?.head?.sha),
+    };
+    const failed = Object.keys(checks).filter((key) => !checks[key]);
+    // Log only our fixed condition names, never upstream values or credentials.
+    if (failed.length) logError(`ContextRail PR comparison validation failed: ${failed.join(', ')}`);
+    return failed.length === 0;
+}
+export async function githubRequest(c, path, method = 'GET', body) {
+    const { githubRequester } = await loadAssessModule('github');
+    return githubRequester(c.repository, e.GH_READ_TOKEN)(path, method, body);
+}
+export const currentPR = (c) => githubRequest(c, `/pulls/${c.pr}`);
+export async function guarded(stage, fn) {
+    try {
+        await fn();
+    } catch (error) {
+        // Never echo arbitrary exception text, upstream responses, commands or credentials.
+        const codes = [
+            'package_version_missing',
+            'invalid_package_version',
+            'configuration_unavailable',
+            'github_token_missing',
+            'github_read_failed',
+            'ineligible_pr',
+            'superseded_comparison',
+            'git_fetch_failed',
+            'fixed_commit_invalid',
+            'assessment_credentials_missing',
+            'assessment_execution_failed',
+            'package_install_failed',
+            'installed_package_invalid',
+            'event_rejected',
+            'event_comparison_invalid',
+            'invalid_configuration',
+        ];
+        const code = codes.includes(error?.message) ? error.message : `${stage}_failed`;
+        if (e.ASSESS_ROOT) write(join(e.ASSESS_ROOT, `${stage}-status.json`), { status: 'failed', code });
+        const help = ['package_version_missing', 'invalid_package_version'].includes(code)
+            ? ' Configure package-version with a qualified exact published npm version; there is no source fallback.'
+            : '';
+        logError(
+            `::error::ContextRail ${stage}: ${code}.${help} No success is implied; inspect the summary and available evidence.`,
+        );
+        process.exitCode = 2;
+    }
+}
+
+export async function loadAssessModule(name) {
+    if (!['github', 'presentation'].includes(name)) fail('invalid_configuration');
+    return import(pathToFileURL(join(e.ASSESS_ROOT, 'tool/node_modules/@contextrail/assess/dist', name + '.js')).href);
+}

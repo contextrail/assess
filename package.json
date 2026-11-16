@@ -1,0 +1,57 @@
+{
+    "name": "@contextrail/assess",
+    "version": "1.0.0-alpha.1",
+    "description": "Assess proposed Git changes against published organizational standards, with per-standard outcomes and retained evidence.",
+    "type": "module",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "bin": {
+        "contextrail-assess": "dist/cli.js"
+    },
+    "files": [
+        "dist/*.js",
+        "dist/*.d.ts",
+        "README.md",
+        "docs/*.md",
+        "examples/assess-pull-request.yml",
+        "assets/brand/*.png"
+    ],
+    "engines": {
+        "node": ">=22.18.0"
+    },
+    "license": "Apache-2.0",
+    "scripts": {
+        "build": "node --eval \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && pnpm run compile",
+        "typecheck": "tsc --noEmit",
+        "lint": "eslint src tests action/scripts",
+        "test": "pnpm run compile && vitest run",
+        "prepack": "pnpm run build",
+        "compile": "tsc"
+    },
+    "dependencies": {
+        "@ai-sdk/openai": "4.0.106",
+        "@modelcontextprotocol/client": "2.4.0",
+        "ai": "7.0.159",
+        "zod": "4.6.7"
+    },
+    "devDependencies": {
+        "@types/node": "22.20.5",
+        "typescript": "5.9.3",
+        "vitest": "5.0.5",
+        "@eslint/js": "9.39.5",
+        "@typescript-eslint/eslint-plugin": "8.72.1",
+        "@typescript-eslint/parser": "8.72.1",
+        "eslint": "9.39.5",
+        "eslint-plugin-prettier": "5.5.7",
+        "prettier": "3.9.10"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/contextrail/assess.git"
+    },
+    "publishConfig": {
+        "access": "public",
+        "registry": "https://registry.npmjs.org/"
+    },
+    "packageManager": "pnpm@11.28.10"
+}

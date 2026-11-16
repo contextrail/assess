@@ -1,0 +1,219 @@
+name: ContextRail Assess
+description: Install ContextRail Assess and assess a caller-selected fixed PR comparison with retained evidence.
+inputs:
+  package-version:
+    description: 'Exact published @contextrail/assess npm version; no fallback.'
+    required: true
+  pr-number:
+    description: 'PR number in the workflow repository; the caller owns run authorization.'
+    required: true
+  base-branch:
+    description: 'Optional expected PR target branch; empty accepts any target branch.'
+    required: false
+    default: ''
+  reviewer:
+    description: 'Published skill:// reviewer ID, not a run or repository ID.'
+    required: true
+  mcp-url:
+    description: 'HTTPS ContextRail MCP endpoint.'
+    required: true
+  mcp-org-id:
+    description: 'ContextRail organization scope.'
+    required: true
+  provider:
+    description: 'CLI provider: openai or openrouter.'
+    required: true
+  model:
+    description: 'Provider-native model ID.'
+    required: true
+  enforcement:
+    description: 'advisory reports only; required blocks violations; strict also blocks evidence gaps. Execution failures always fail.'
+    required: false
+    default: advisory
+  effort:
+    description: 'CLI effort; empty uses provider default.'
+    required: false
+    default: ''
+  phase-models:
+    description: 'JSON overrides for assess/verify provider/model and optional effort.'
+    required: false
+    default: '{}'
+  log-level:
+    description: 'Console verbosity: quiet, info or debug. Retained safe diagnostics are always enabled.'
+    required: false
+    default: 'info'
+  max-time-ms:
+    description: 'Positive model-session time limit in milliseconds.'
+    required: true
+  feedback:
+    description: 'CLI feedback: send or off.'
+    required: false
+    default: 'send'
+  repository-attribution:
+    description: 'Explicitly disclose repository identity to ContextRail.'
+    required: false
+    default: 'false'
+  artifact-retention-days:
+    description: 'Evidence retention, 1-90 days, within repository policy.'
+    required: false
+    default: '7'
+  github-token:
+    description: 'GitHub Actions token for Git/PR reads; pull-requests/write is also required when post-comment is true.'
+    required: false
+    default: '${{ github.token }}'
+  post-comment:
+    description: 'Create/update a github-actions bot PR comment with the review summary. Requires pull-requests/write.'
+    required: false
+    default: 'false'
+  inline-comments:
+    description: 'Post verified findings and eligible checked suggestions on diff lines. Requires post-comment and pull-requests/write.'
+    required: false
+    default: 'false'
+  pr-context:
+    description: 'Collect bounded prior bot history, PR discussions, resolutions and review states for a CLI version supporting --pr-context.'
+    required: false
+    default: 'false'
+  mcp-auth-token:
+    description: 'ContextRail bearer credential; passed only to CLI step.'
+    required: true
+  openai-api-key:
+    description: 'Provider credential when provider is openai.'
+    required: false
+    default: ''
+  openrouter-api-key:
+    description: 'Provider credential when provider is openrouter.'
+    required: false
+    default: ''
+outputs:
+  assessment-exit:
+    description: 'Unmodified CLI exit 0/1/2; empty when not invoked or interrupted.'
+    value: ${{ steps.assess.outputs.exit }}
+  run-id:
+    description: 'Unique CLI runId when confirmed by saved evidence.'
+    value: ${{ steps.summary.outputs.run-id }}
+  feedback-status:
+    description: 'CLI reporting status or unavailable.'
+    value: ${{ steps.summary.outputs.feedback-status }}
+  comparison-status:
+    description: 'Freshness at finish, superseded or unknown.'
+    value: ${{ steps.evidence.outputs.comparison-status }}
+  artifact-url:
+    description: 'GitHub evidence artifact URL when uploaded.'
+    value: ${{ steps.archive.outputs.artifact-url }}
+  comment-status:
+    description: 'created, updated, skipped_superseded, skipped_newer, or failed; empty when disabled.'
+    value: ${{ steps.comment.outputs.comment-status }}
+  publication-artifact-url:
+    description: 'Post-publication payload/outcome evidence artifact URL when available.'
+    value: ${{ steps.publication_archive.outputs.artifact-url }}
+runs:
+  using: composite
+  steps:
+    - name: Set up Node
+      uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      with:
+        node-version: '22.18.0'
+        package-manager-cache: false
+        token: ''
+    - name: Validate and install ContextRail Assess
+      id: setup
+      shell: bash
+      env:
+        PACKAGE_VERSION: ${{ inputs.package-version }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+        BASE_BRANCH: ${{ inputs.base-branch }}
+        REVIEWER: ${{ inputs.reviewer }}
+        MCP_URL: ${{ inputs.mcp-url }}
+        MCP_ORG_ID: ${{ inputs.mcp-org-id }}
+        PROVIDER: ${{ inputs.provider }}
+        MODEL: ${{ inputs.model }}
+        EFFORT: ${{ inputs.effort }}
+        ENFORCEMENT: ${{ inputs.enforcement }}
+        PHASE_MODELS: ${{ inputs.phase-models }}
+        LOG_LEVEL: ${{ inputs.log-level }}
+        INLINE_COMMENTS: ${{ inputs.inline-comments }}
+        POST_COMMENT: ${{ inputs.post-comment }}
+        MAX_TIME_MS: ${{ inputs.max-time-ms }}
+        FEEDBACK: ${{ inputs.feedback }}
+        REPOSITORY_ATTRIBUTION: ${{ inputs.repository-attribution }}
+        ARTIFACT_RETENTION_DAYS: ${{ inputs.artifact-retention-days }}
+      run: exec node "$GITHUB_ACTION_PATH/scripts/install.mjs"
+    - name: Prepare fixed comparison
+      id: comparison
+      shell: bash
+      env:
+        ASSESS_ROOT: ${{ steps.setup.outputs.root }}
+        GH_READ_TOKEN: ${{ inputs.github-token }}
+      run: exec node "$GITHUB_ACTION_PATH/scripts/comparison.mjs"
+    - name: Collect PR history and discussion
+      id: context
+      if: ${{ inputs.pr-context == 'true' }}
+      shell: bash
+      env:
+        ASSESS_ROOT: ${{ steps.setup.outputs.root }}
+        GH_READ_TOKEN: ${{ inputs.github-token }}
+      run: exec node "$GITHUB_ACTION_PATH/scripts/context.mjs"
+    - name: Run ContextRail Assess
+      id: assess
+      shell: bash
+      env:
+        ASSESS_ROOT: ${{ steps.setup.outputs.root }}
+        PR_CONTEXT_PATH: ${{ steps.context.outputs.path || steps.comparison.outputs.pr-context-path }}
+        CONTEXTRAIL_MCP_AUTH_TOKEN: ${{ inputs.mcp-auth-token }}
+        OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+        OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
+      run: exec node "$GITHUB_ACTION_PATH/scripts/assess.mjs"
+    - name: Preserve available evidence and recheck currency
+      id: evidence
+      if: ${{ always() }}
+      shell: bash
+      env:
+        ASSESS_ROOT: ${{ steps.setup.outputs.root }}
+        GH_READ_TOKEN: ${{ inputs.github-token }}
+      run: exec node "$GITHUB_ACTION_PATH/scripts/evidence.mjs"
+    - name: Upload available evidence
+      id: archive
+      if: ${{ always() && steps.evidence.outputs.available == 'true' && steps.setup.outputs.retention != '' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: contextrail-assess-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.action }}
+        path: ${{ steps.evidence.outputs.path }}
+        include-hidden-files: true
+        if-no-files-found: error
+        retention-days: ${{ steps.setup.outputs.retention }}
+    - name: Summarize confirmed result
+      id: summary
+      if: ${{ always() }}
+      shell: bash
+      env:
+        ASSESS_ROOT: ${{ steps.setup.outputs.root }}
+        ARTIFACT_URL: ${{ steps.archive.outputs.artifact-url }}
+        ARTIFACT_OUTCOME: ${{ steps.archive.outcome }}
+      run: exec node "$GITHUB_ACTION_PATH/scripts/summary.mjs"
+    - name: Update PR review comment
+      id: comment
+      if: ${{ always() && inputs.post-comment == 'true' }}
+      shell: bash
+      env:
+        ASSESS_ROOT: ${{ steps.setup.outputs.root }}
+        GH_READ_TOKEN: ${{ inputs.github-token }}
+        INLINE_COMMENTS: ${{ inputs.inline-comments }}
+      run: exec node "$GITHUB_ACTION_PATH/scripts/comment.mjs"
+    - name: Preserve publication outcomes
+      id: publication_evidence
+      if: ${{ always() }}
+      shell: bash
+      env:
+        ASSESS_ROOT: ${{ steps.setup.outputs.root }}
+        PUBLICATION_ONLY: 'true'
+      run: exec node "$GITHUB_ACTION_PATH/scripts/evidence.mjs"
+    - name: Upload publication outcomes
+      id: publication_archive
+      if: ${{ always() && steps.publication_evidence.outputs.available == 'true' && steps.setup.outputs.retention != '' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: contextrail-assess-publication-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.action }}
+        path: ${{ steps.publication_evidence.outputs.path }}
+        include-hidden-files: true
+        if-no-files-found: error
+        retention-days: ${{ steps.setup.outputs.retention }}
