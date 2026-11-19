@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { accessSync, constants, realpathSync, statSync } from 'node:fs';
+import { delimiter, isAbsolute, join } from 'node:path';
 
 export const MAX_PREPARATION_BYTES = 16 * 1024 * 1024;
 
@@ -41,7 +42,7 @@ export function readableDiff(
             const remaining = deadline - Date.now();
             if (remaining <= 0) throw new Error('readable_diff_deadline');
             return execFileSync(
-                'git',
+                gitExecutable(),
                 [
                     '--no-pager',
                     '--no-lazy-fetch',
@@ -99,6 +100,32 @@ export function readableDiff(
     return { patch, stat, files: eligible, excludedPaths: omitted };
 }
 
+let resolvedGit: string | undefined;
+
+/**
+ * The git executable, resolved once from absolute PATH entries. Spawning the bare name repeats the PATH search
+ * on every call, which costs tens of milliseconds per call on some macOS setups. Falls back to the bare name so
+ * a missing git still fails at spawn as before.
+ */
+export function gitExecutable(): string {
+    if (resolvedGit) return resolvedGit;
+    const name = process.platform === 'win32' ? 'git.exe' : 'git';
+    for (const directory of (process.env.PATH ?? '').split(delimiter)) {
+        const candidate = join(directory, name);
+        if (isAbsolute(directory) && executableFile(candidate)) return (resolvedGit = candidate);
+    }
+    return 'git';
+}
+
+function executableFile(path: string): boolean {
+    try {
+        accessSync(path, constants.X_OK);
+        return statSync(path).isFile();
+    } catch {
+        return false;
+    }
+}
+
 export function passiveGitEnvironment(): NodeJS.ProcessEnv {
     const env = { ...process.env };
     for (const name of Object.keys(env)) if (name.startsWith('GIT_')) delete env[name];
@@ -116,7 +143,7 @@ export function passiveGitEnvironment(): NodeJS.ProcessEnv {
 
 function git(repository: string, args: string[]): string {
     return execFileSync(
-        'git',
+        gitExecutable(),
         [
             '--no-pager',
             '--no-lazy-fetch',

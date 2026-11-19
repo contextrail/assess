@@ -261,23 +261,48 @@ export function validateConcern(
         parsed.sourceRefs.map((c) => ledger.cite(c)),
         observation.passage,
     );
-    if (
-        parsed.decision === 'supported_violation' &&
-        (!sourceRefs.length || !parsed.consequence.trim() || !parsed.correction.trim())
-    )
-        throw Error('supported_violation_requires_evidence_and_correction');
-    if (parsed.decision === 'supported_violation' && parsed.applicability !== 'applicable')
-        throw Error('violation_applicability_required');
-    if (parsed.decision === 'not_applicable' && parsed.applicability !== 'not_applicable')
-        throw Error('inapplicable_decision_conflict');
-    if (parsed.decision === 'external_follow_up') {
-        if (!parsed.externalEvidence || !sourceRefs.length || !parsed.correction.trim())
-            throw Error('external_follow_up_requires_boundary_source_and_action');
-        if (parsed.applicability === 'not_applicable') throw Error('irrelevant_external_follow_up');
-    } else if (parsed.externalEvidence) throw Error('external_evidence_decision_mismatch');
-    if (parsed.suggestionAccepted && (parsed.decision !== 'supported_violation' || !observation.proposedReplacement))
-        throw Error('unsupported_replacement_acceptance');
+    const conflict = decisionConflict(parsed, sourceRefs.length > 0, observation);
+    if (conflict) throw Error(conflict);
     return { ...parsed, sourceRefs, observationId: observation.id };
+}
+
+type ParsedDecision = Omit<ConcernDecision, 'sourceRefs' | 'observationId'>;
+
+/** The first rule a concern decision breaks, as its error code. */
+function decisionConflict(
+    parsed: ParsedDecision,
+    hasSourceRefs: boolean,
+    observation: CandidateObservation,
+): string | undefined {
+    const violation = parsed.decision === 'supported_violation';
+    return (
+        (violation ? violationConflict(parsed, hasSourceRefs) : undefined) ??
+        (parsed.decision === 'not_applicable' && parsed.applicability !== 'not_applicable'
+            ? 'inapplicable_decision_conflict'
+            : undefined) ??
+        externalEvidenceConflict(parsed, hasSourceRefs) ??
+        (parsed.suggestionAccepted && (!violation || !observation.proposedReplacement)
+            ? 'unsupported_replacement_acceptance'
+            : undefined)
+    );
+}
+
+/** A supported violation needs source evidence, a consequence and a correction, and must apply. */
+function violationConflict(parsed: ParsedDecision, hasSourceRefs: boolean): string | undefined {
+    if (!hasSourceRefs || !parsed.consequence.trim() || !parsed.correction.trim())
+        return 'supported_violation_requires_evidence_and_correction';
+    if (parsed.applicability !== 'applicable') return 'violation_applicability_required';
+    return undefined;
+}
+
+/** External evidence belongs only to an applicable external follow-up with a boundary, source and action. */
+function externalEvidenceConflict(parsed: ParsedDecision, hasSourceRefs: boolean): string | undefined {
+    if (parsed.decision !== 'external_follow_up')
+        return parsed.externalEvidence ? 'external_evidence_decision_mismatch' : undefined;
+    if (!parsed.externalEvidence || !hasSourceRefs || !parsed.correction.trim())
+        return 'external_follow_up_requires_boundary_source_and_action';
+    if (parsed.applicability === 'not_applicable') return 'irrelevant_external_follow_up';
+    return undefined;
 }
 
 function projectCheck(check: CheckAssessment, decision: ConcernDecision | undefined): CheckAssessment {
@@ -297,6 +322,9 @@ function projectCheck(check: CheckAssessment, decision: ConcernDecision | undefi
     };
 }
 
+type Judgment = { observation: CandidateObservation; decision: ConcernDecision | undefined };
+type Finding = AssessmentProposal['findings'][number];
+
 export function projectCandidates(
     state: {
         entries: AssessmentEntry[];
@@ -312,60 +340,12 @@ export function projectCandidates(
     state.followUps = [];
     for (const proposal of proposals) {
         const entry = state.entries.find((e) => e.assessmentId === proposal.result.assessmentId)!;
-        const observations = proposal.observations ?? [];
-        const judgments = observations.map((o) => ({
+        const judgments: Judgment[] = (proposal.observations ?? []).map((o) => ({
             observation: o,
             decision: decisions.find((d) => d.observationId === o.id),
         }));
-        const violations = judgments.filter((x) => x.decision?.decision === 'supported_violation');
-        const unresolved = judgments.filter((x) =>
-            x.observation.concern
-                ? !x.decision || ['missing_evidence', 'ambiguous_rule'].includes(x.decision.decision)
-                : x.observation.unknowns.length > 0,
-        );
-        for (const { observation: o, decision: d } of judgments) {
-            if (d?.decision !== 'external_follow_up' || !d.externalEvidence) continue;
-            state.followUps.push({
-                kind: 'external_evidence',
-                required: false,
-                verified: true,
-                assessmentId: entry.assessmentId,
-                passage: o.passage,
-                sourceRefs: d.sourceRefs,
-                explanation: d.reason,
-                action: d.correction,
-                externalEvidence: d.externalEvidence,
-            });
-        }
-        const explanation = judgments
-            .map((x) => x.decision?.reason || x.observation.observation || x.observation.unknowns.join(' '))
-            .join('\n');
-        entry.result = {
-            ...proposal.result,
-            explanation,
-            limitations: [
-                ...proposal.result.limitations,
-                ...judgments
-                    .filter((x) => x.decision?.decision === 'external_follow_up')
-                    .map(
-                        (x) =>
-                            `Outside artifact evidence boundary: ${x.decision!.externalEvidence!.subject}. Not assessed; no compliance conclusion.`,
-                    ),
-            ],
-            citations: [...proposal.result.citations, ...judgments.flatMap((x) => x.decision?.sourceRefs ?? [])],
-            disposition: unresolved.length ? 'unresolved' : violations.length ? 'evaluated' : 'observed',
-            adherence: violations.length && !unresolved.length ? 0 : null,
-            confidence: null,
-            finding: violations.length
-                ? violations.some((x) => x.decision!.duty === 'binding')
-                    ? 'binding_violation'
-                    : 'guidance_departure'
-                : 'none',
-            consequence: violations.map((x) => x.decision!.consequence).join('\n'),
-            correction: violations.map((x) => x.decision!.correction).join('\n'),
-            confidenceReason:
-                'No calibrated confidence estimate is supplied; nominated concerns have independent evidence-based decisions.',
-        };
+        state.followUps.push(...externalFollowUps(entry.assessmentId, judgments));
+        entry.result = projectedResult(proposal.result, judgments);
         state.checks.push(
             ...proposal.checks.map((check) =>
                 projectCheck(
@@ -374,63 +354,130 @@ export function projectCandidates(
                 ),
             ),
         );
-        for (const { observation: o, decision: d } of violations) {
-            const replacement = o.proposedReplacement;
-            const before = replacement?.source.quote.replace(/\n$/u, '');
-            const suggestion =
-                replacement && d!.suggestionAccepted
-                    ? {
-                          path: String(replacement.source.provenance.path),
-                          blob: String(replacement.source.provenance.object),
-                          startLine: replacement.source.location!.line,
-                          endLine: replacement.source.location!.line + before!.split('\n').length - 1,
-                          before: before!,
-                          replacement: replacement.replacement,
-                          verified: true,
-                      }
-                    : undefined;
-            const finding = {
-                proposedReplacement: suggestion,
-                findingId: `finding:${digest({ assessmentId: entry.assessmentId, id: o.id })}`,
-                assessmentIds: [entry.assessmentId],
-                checkIds: [o.id],
-                classification:
-                    d!.duty === 'binding' ? ('binding_violation' as const) : ('guidance_departure' as const),
-                locationRefs: d!.sourceRefs,
-                explanation: d!.reason,
-                consequence: d!.consequence,
-                correction: d!.correction,
-                limitations: o.assumptions,
-                verified: true,
-            };
-            const duplicate = state.findings.find(
-                (f) =>
-                    f.classification === finding.classification &&
-                    f.explanation.trim() === finding.explanation.trim() &&
-                    f.consequence.trim() === finding.consequence.trim() &&
-                    f.correction.trim() === finding.correction.trim() &&
-                    f.locationRefs.some((c) =>
-                        finding.locationRefs.some((r) => r.ref === c.ref && r.start === c.start && r.end === c.end),
-                    ),
-            );
-            if (duplicate) {
-                if (finding.classification === 'binding_violation') duplicate.classification = 'binding_violation';
-                duplicate.locationRefs = [
-                    ...duplicate.locationRefs,
-                    ...finding.locationRefs.filter(
-                        (c) =>
-                            !duplicate.locationRefs.some(
-                                (r) => r.ref === c.ref && r.start === c.start && r.end === c.end,
-                            ),
-                    ),
-                ];
-                duplicate.assessmentIds = [...new Set([...duplicate.assessmentIds, ...finding.assessmentIds])];
-                duplicate.checkIds = [...new Set([...duplicate.checkIds, ...finding.checkIds])];
-                duplicate.sourceFindingIds = [
-                    ...(duplicate.sourceFindingIds ?? [duplicate.findingId]),
-                    finding.findingId,
-                ];
-            } else state.findings.push(finding);
-        }
+        for (const { observation, decision } of judgments.filter(isViolation))
+            mergeFinding(state.findings, violationFinding(entry.assessmentId, observation, decision!));
     }
+}
+
+function isViolation(judgment: Judgment): boolean {
+    return judgment.decision?.decision === 'supported_violation';
+}
+
+function externalFollowUps(assessmentId: string, judgments: Judgment[]): NonNullable<AssessmentProposal['followUps']> {
+    return judgments.flatMap(({ observation: o, decision: d }) =>
+        d?.decision !== 'external_follow_up' || !d.externalEvidence
+            ? []
+            : [
+                  {
+                      kind: 'external_evidence' as const,
+                      required: false,
+                      verified: true,
+                      assessmentId,
+                      passage: o.passage,
+                      sourceRefs: d.sourceRefs,
+                      explanation: d.reason,
+                      action: d.correction,
+                      externalEvidence: d.externalEvidence,
+                  },
+              ],
+    );
+}
+
+/** The assessment result after its nominated concerns were independently decided. */
+function projectedResult(result: AssessmentProposal['result'], judgments: Judgment[]): AssessmentProposal['result'] {
+    const violations = judgments.filter(isViolation);
+    const unresolved = judgments.filter((x) =>
+        x.observation.concern
+            ? !x.decision || ['missing_evidence', 'ambiguous_rule'].includes(x.decision.decision)
+            : x.observation.unknowns.length > 0,
+    );
+    const explanation = judgments
+        .map((x) => x.decision?.reason || x.observation.observation || x.observation.unknowns.join(' '))
+        .join('\n');
+    return {
+        ...result,
+        explanation,
+        limitations: [
+            ...result.limitations,
+            ...judgments
+                .filter((x) => x.decision?.decision === 'external_follow_up')
+                .map(
+                    (x) =>
+                        `Outside artifact evidence boundary: ${x.decision!.externalEvidence!.subject}. Not assessed; no compliance conclusion.`,
+                ),
+        ],
+        citations: [...result.citations, ...judgments.flatMap((x) => x.decision?.sourceRefs ?? [])],
+        disposition: unresolved.length ? 'unresolved' : violations.length ? 'evaluated' : 'observed',
+        adherence: violations.length && !unresolved.length ? 0 : null,
+        confidence: null,
+        finding: violations.length
+            ? violations.some((x) => x.decision!.duty === 'binding')
+                ? 'binding_violation'
+                : 'guidance_departure'
+            : 'none',
+        consequence: violations.map((x) => x.decision!.consequence).join('\n'),
+        correction: violations.map((x) => x.decision!.correction).join('\n'),
+        confidenceReason:
+            'No calibrated confidence estimate is supplied; nominated concerns have independent evidence-based decisions.',
+    };
+}
+
+function violationFinding(assessmentId: string, o: CandidateObservation, d: ConcernDecision): Finding {
+    const replacement = o.proposedReplacement;
+    const before = replacement?.source.quote.replace(/\n$/u, '');
+    const suggestion =
+        replacement && d.suggestionAccepted
+            ? {
+                  path: String(replacement.source.provenance.path),
+                  blob: String(replacement.source.provenance.object),
+                  startLine: replacement.source.location!.line,
+                  endLine: replacement.source.location!.line + before!.split('\n').length - 1,
+                  before: before!,
+                  replacement: replacement.replacement,
+                  verified: true,
+              }
+            : undefined;
+    return {
+        proposedReplacement: suggestion,
+        findingId: `finding:${digest({ assessmentId, id: o.id })}`,
+        assessmentIds: [assessmentId],
+        checkIds: [o.id],
+        classification: d.duty === 'binding' ? ('binding_violation' as const) : ('guidance_departure' as const),
+        locationRefs: d.sourceRefs,
+        explanation: d.reason,
+        consequence: d.consequence,
+        correction: d.correction,
+        limitations: o.assumptions,
+        verified: true,
+    };
+}
+
+function sameRange(a: { ref: string; start?: number; end?: number }, b: { ref: string; start?: number; end?: number }) {
+    return a.ref === b.ref && a.start === b.start && a.end === b.end;
+}
+
+/**
+ * A finding with the same classification and text at an overlapping location joins the earlier
+ * one; locations, assessments, checks and source finding IDs accumulate.
+ */
+function mergeFinding(findings: Finding[], finding: Finding): void {
+    const duplicate = findings.find(
+        (f) =>
+            f.classification === finding.classification &&
+            f.explanation.trim() === finding.explanation.trim() &&
+            f.consequence.trim() === finding.consequence.trim() &&
+            f.correction.trim() === finding.correction.trim() &&
+            f.locationRefs.some((c) => finding.locationRefs.some((r) => sameRange(r, c))),
+    );
+    if (!duplicate) {
+        findings.push(finding);
+        return;
+    }
+    duplicate.locationRefs = [
+        ...duplicate.locationRefs,
+        ...finding.locationRefs.filter((c) => !duplicate.locationRefs.some((r) => sameRange(r, c))),
+    ];
+    duplicate.assessmentIds = [...new Set([...duplicate.assessmentIds, ...finding.assessmentIds])];
+    duplicate.checkIds = [...new Set([...duplicate.checkIds, ...finding.checkIds])];
+    duplicate.sourceFindingIds = [...(duplicate.sourceFindingIds ?? [duplicate.findingId]), finding.findingId];
 }

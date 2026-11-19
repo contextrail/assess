@@ -83,6 +83,16 @@ export function validateResult(
     if (!entry.material) throw new Error('Pinned publication unavailable; this entry cannot be assessed.');
     validateJudgment(value);
     const citations = value.citations.map((citation, index) => ledger.cite(citation, [...path, 'citations', index]));
+    assertEvidenceRequirements(value, citations, entry);
+    return { ...value, citations, revision: (currentRevision ?? 0) + 1 };
+}
+
+/** Cite the entry's own publication; evaluated judgments also need source; findings need consequence and correction. */
+function assertEvidenceRequirements(
+    value: { disposition: string; finding: string; consequence: string; correction: string },
+    citations: ReturnType<EvidenceLedger['cite']>[],
+    entry: AssessmentEntry,
+): void {
     if (
         !citations.some(
             (c) =>
@@ -101,7 +111,6 @@ export function validateResult(
         );
     if (value.finding !== 'none' && (!value.consequence.trim() || !value.correction.trim()))
         throw new Error('Findings need a concrete consequence and proportionate correction.');
-    return { ...value, citations, revision: (currentRevision ?? 0) + 1 };
 }
 
 function resultGate(result: ResultSlot) {

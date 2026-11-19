@@ -34,6 +34,8 @@ function assessmentArguments(c, fixed) {
         args.push('--pr-context', e.PR_CONTEXT_PATH);
     }
     if (c.effort) args.push('--effort', c.effort);
+    if (c.speed && c.speed !== 'normal') args.push('--speed', c.speed);
+    if (c.maxVerifyCalls) args.push('--max-verify-calls', c.maxVerifyCalls);
     if (c.repositoryAttribution) args.push('--repository-attribution');
     return args;
 }

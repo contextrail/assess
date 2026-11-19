@@ -32,7 +32,17 @@ quickstart with:
 
 `--effort none|minimal|low|medium|high|xhigh` requests provider-specific reasoning
 effort only when that model supports it. A valid CLI setting does not ensure that
-a provider accepts it. Source excerpts and published guidance are sent to your
+a provider accepts it.
+
+`--speed normal|fast|ultrafast` (default `normal`) requests the provider's service
+tier for every call: `fast` sends `service_tier: "priority"` and `ultrafast` sends
+`service_tier: "ultrafast"`. Both OpenAI and OpenRouter read the field, but only some
+models serve each tier, and faster tiers cost more per token. The tier is best effort:
+if the provider rejects it, Assess logs `provider_speed_unavailable`, resends that
+request without the tier and stops requesting it for that model; if a response reports
+a different tier, Assess logs the same event once. Neither case fails the run.
+
+Source excerpts and published guidance are sent to your
 selected model provider; use an account and data-handling arrangement appropriate
 for that material.
 
@@ -69,6 +79,7 @@ and reviewer ID have no environment aliases. See `--help` for the current option
 | `--max-output-tokens N`                                 | Unset; per-call output allowance, including reasoning tokens where applicable.                                                                        |
 | `--max-total-tokens N`                                  | Unset; observed provider total-token cutoff between calls. Can overshoot by one call; missing usage prevents honest enforcement and stops the review. |
 | `--max-time-ms N`                                       | Unset; model-session deadline in ms, excluding preparation.                                                                                           |
+| `--max-verify-calls N`                                  | 12; model calls per finding verification. Raise it for large changes.                                                                                 |
 | `--source-page-entries N`                               | 100 entries per list/change response.                                                                                                                 |
 | `--source-search-matches N` / `--source-search-files N` | 100 each, per search page.                                                                                                                            |
 | `--source-read-lines N` / `--source-read-bytes N`       | 200 lines / 65536 bytes per source response; bytes >=4.                                                                                               |

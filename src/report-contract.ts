@@ -158,69 +158,10 @@ export const reviewReportInputSchema = z
         }),
     })
     .superRefine((v, ctx) => {
-        const issue = () => ctx.addIssue({ code: 'custom', message: 'Inconsistent structured review metadata.' });
-        const expected = v.scope.expected;
-        if (
-            v.concernValidation &&
-            (v.concernValidation.validated > v.concernValidation.expected ||
-                v.concernValidation.complete !== (v.concernValidation.validated === v.concernValidation.expected))
-        )
-            issue();
-        if (v.completion === 'complete' && v.concernValidation?.complete === false) issue();
-        if (
-            new Set(expected.map((e) => e.entryId)).size !== expected.length ||
-            new Set(expected.map((e) => `${e.context.nodeId}@${e.context.version}`)).size !== expected.length
-        )
-            issue();
-        if (v.scope.expectedCount !== null && v.scope.expectedCount < expected.length) issue();
-        if (v.scope.enumeration === 'complete' && (v.scope.expectedCount !== expected.length || !expected.length))
-            issue();
-        if (new Set(v.outcomes.map((e) => e.entryId)).size !== v.outcomes.length) issue();
-        for (const o of v.outcomes) {
-            if (!expected.some((e) => e.entryId === o.entryId)) issue();
-            if (o.disposition === 'evaluated') {
-                if (
-                    o.adherence === null ||
-                    (o.confidence === null && !v.concernValidation) ||
-                    (o.finding === 'none') !== (o.adherence === 2)
-                )
-                    issue();
-            } else if (
-                o.adherence !== null ||
-                (o.disposition !== 'unresolved' && o.finding !== 'none') ||
-                (o.disposition !== 'not_applicable' && o.confidence !== null)
-            )
-                issue();
-            if (v.origin === 'agent_skill' ? o.blocking !== null : typeof o.blocking !== 'boolean') issue();
-            if (v.runner && o.blocking !== policyBlocksOutcome(v.runner.policy, o)) issue();
+        // One issue per failed check, in a stable order.
+        for (const consistent of reviewMetadataChecks(v)) {
+            if (!consistent) ctx.addIssue({ code: 'custom', message: 'Inconsistent structured review metadata.' });
         }
-        if (
-            v.origin === 'npm' ? !v.runner || v.packageVersion === null : v.runner !== null || v.packageVersion !== null
-        )
-            issue();
-        if (v.completion === 'complete' && (!isCompleteReviewCoverage(v) || v.stopReason !== 'finished')) issue();
-        if (v.runner && 'enforcement' in v.runner.policy) {
-            if (!validEnforcementDecision(v)) issue();
-        } else if (v.runner && 'advisory' in v.runner.policy) {
-            const policy = v.runner.policy;
-            const blocking = v.outcomes.some((o) => o.blocking);
-            const insufficient = v.outcomes.some(
-                (o) => policy.minConfidence !== null && (o.confidence === null || o.confidence < policy.minConfidence),
-            );
-            const reviewExit = blocking ? 1 : v.completion === 'incomplete' || insufficient ? 2 : 0;
-            if (v.completion === 'complete' && insufficient) issue();
-            if (
-                v.runner.reviewExit !== reviewExit ||
-                (v.runner.exitCode !== reviewExit && !(v.runner.exitCode === 2 && v.completion === 'incomplete'))
-            )
-                issue();
-        }
-        const usage = v.telemetry.usage;
-        if (
-            new Set(usage.map((u) => u.call)).size !== usage.length ||
-            (v.telemetry.calls === null ? usage.length > 0 : usage.some((u) => u.call > v.telemetry.calls!))
-        )
-            issue();
     })
     .refine(
         (v) => new TextEncoder().encode(JSON.stringify(v)).length <= 512 * 1024,
@@ -283,4 +224,69 @@ function validEnforcementDecision(report: ReviewReportInput): boolean {
         );
     const reviewExit = blocking || (strictGap && !executionFailed) ? 1 : 0;
     return runner.reviewExit === reviewExit && runner.exitCode === (executionFailed ? 2 : reviewExit);
+}
+
+/** Every cross-field rule of structured review metadata; `false` marks an inconsistency. */
+function reviewMetadataChecks(v: ReviewReportInput): boolean[] {
+    const expected = v.scope.expected;
+    const validation = v.concernValidation;
+    return [
+        !validation ||
+            (validation.validated <= validation.expected &&
+                validation.complete === (validation.validated === validation.expected)),
+        !(v.completion === 'complete' && validation?.complete === false),
+        new Set(expected.map((e) => e.entryId)).size === expected.length &&
+            new Set(expected.map((e) => `${e.context.nodeId}@${e.context.version}`)).size === expected.length,
+        v.scope.expectedCount === null || v.scope.expectedCount >= expected.length,
+        v.scope.enumeration !== 'complete' || (v.scope.expectedCount === expected.length && expected.length > 0),
+        new Set(v.outcomes.map((e) => e.entryId)).size === v.outcomes.length,
+        ...v.outcomes.flatMap((o) => outcomeChecks(v, o)),
+        v.origin === 'npm' ? Boolean(v.runner) && v.packageVersion !== null : !v.runner && v.packageVersion === null,
+        v.completion !== 'complete' || (isCompleteReviewCoverage(v) && v.stopReason === 'finished'),
+        ...runnerDecisionChecks(v),
+        telemetryConsistent(v.telemetry),
+    ];
+}
+
+function outcomeChecks(v: ReviewReportInput, o: ReportOutcome): boolean[] {
+    const dispositionConsistent =
+        o.disposition === 'evaluated'
+            ? o.adherence !== null &&
+              (o.confidence !== null || Boolean(v.concernValidation)) &&
+              (o.finding === 'none') === (o.adherence === 2)
+            : o.adherence === null &&
+              (o.disposition === 'unresolved' || o.finding === 'none') &&
+              (o.disposition === 'not_applicable' || o.confidence === null);
+    return [
+        v.scope.expected.some((e) => e.entryId === o.entryId),
+        dispositionConsistent,
+        v.origin === 'agent_skill' ? o.blocking === null : typeof o.blocking === 'boolean',
+        !v.runner || o.blocking === policyBlocksOutcome(v.runner.policy, o),
+    ];
+}
+
+/** The runner's exit codes must follow from its policy and the outcomes. */
+function runnerDecisionChecks(v: ReviewReportInput): boolean[] {
+    if (!v.runner) return [];
+    if ('enforcement' in v.runner.policy) return [validEnforcementDecision(v)];
+    if (!('advisory' in v.runner.policy)) return [];
+    const policy = v.runner.policy;
+    const blocking = v.outcomes.some((o) => o.blocking);
+    const insufficient = v.outcomes.some(
+        (o) => policy.minConfidence !== null && (o.confidence === null || o.confidence < policy.minConfidence),
+    );
+    const reviewExit = blocking ? 1 : v.completion === 'incomplete' || insufficient ? 2 : 0;
+    return [
+        !(v.completion === 'complete' && insufficient),
+        v.runner.reviewExit === reviewExit &&
+            (v.runner.exitCode === reviewExit || (v.runner.exitCode === 2 && v.completion === 'incomplete')),
+    ];
+}
+
+function telemetryConsistent(telemetry: ReviewReportInput['telemetry']): boolean {
+    const { calls, usage } = telemetry;
+    return (
+        new Set(usage.map((u) => u.call)).size === usage.length &&
+        (calls === null ? usage.length === 0 : usage.every((u) => u.call <= calls))
+    );
 }

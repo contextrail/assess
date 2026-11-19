@@ -176,6 +176,40 @@ describe('candidate observations and focused validation', () => {
         projectCandidates(f.state, [p], [validateConcern(input, o, f.ledger)]);
         expect(f.state.findings[0]).toMatchObject({ classification: 'binding_violation', verified: true });
         expect(f.state.entries[0]!.result).toMatchObject({ disposition: 'evaluated', adherence: 0, confidence: null });
+        // A violation is only a violation of an obligation that applies.
+        expect(() => validateConcern({ ...input, applicability: 'uncertain' }, o, f.ledger)).toThrow(
+            'violation_applicability_required',
+        );
+    });
+    it('merges the same finding at the same location and keeps differently classified findings apart', () => {
+        const f = fixture(),
+            p = candidateProposal(f.input, f.entries, f.ledger),
+            o = p.observations![0]!;
+        const input = {
+            decision: 'supported_violation',
+            applicability: 'applicable',
+            suggestionAccepted: false,
+            duty: 'binding',
+            reason: 'The trusted storage call receives unchecked input.',
+            consequence: 'Oversized values can be persisted.',
+            correction: 'Enforce the size constraint before storing.',
+            sourceRefs: [{ ref: f.source.ref, quote: f.source.text }],
+        };
+        const second = { ...o, id: `${o.id}-second` };
+        const third = { ...o, id: `${o.id}-third` };
+        projectCandidates(
+            f.state,
+            [p, { ...p, observations: [second] }, { ...p, observations: [third] }],
+            [
+                validateConcern(input, o, f.ledger),
+                validateConcern(input, second, f.ledger),
+                validateConcern({ ...input, duty: 'guidance' }, third, f.ledger),
+            ],
+        );
+        expect(f.state.findings).toHaveLength(2);
+        expect(f.state.findings[0]).toMatchObject({ classification: 'binding_violation', checkIds: [o.id, second.id] });
+        expect(f.state.findings[0]!.sourceFindingIds).toHaveLength(2);
+        expect(f.state.findings[1]).toMatchObject({ classification: 'guidance_departure', checkIds: [third.id] });
     });
     it.each([
         ['refuted', 'evaluated'],

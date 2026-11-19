@@ -35,29 +35,7 @@ function terminalDiagnostic(events) {
     const phaseStart = beforeStop.findLastIndex((event) => event.kind === 'phase_started');
     const phaseEvents = beforeStop.slice(Math.max(0, phaseStart));
     const failedPhase = phaseEvents.findLast((event) => event.kind === 'phase_failed')?.data;
-    // A later successful request, recovery, or new request must not blame an earlier failure.
-    const provider = phaseEvents.findLast((event) =>
-        [
-            'provider_started',
-            'provider_failed',
-            'provider_completed',
-            'provider_recovered',
-            'provider_accounting_failed',
-        ].includes(event.kind),
-    );
-    const samePhase =
-        provider?.data?.phase === failedPhase?.phase &&
-        provider?.data?.attempt === failedPhase?.attempt &&
-        provider?.data?.workUnitId === failedPhase?.workUnitId;
-    const responseRejected = (stopped.details?.causes ?? []).some((code) =>
-        ['AI_JSONParseError', 'AI_TypeValidationError'].includes(code),
-    );
-    const terminalProvider =
-        failedPhase?.code === 'provider_or_execution_failed' &&
-        (provider?.kind === 'provider_failed' || (provider?.kind === 'provider_completed' && responseRejected)) &&
-        samePhase
-            ? provider.data
-            : {};
+    const terminalProvider = blamedProviderFailure(phaseEvents, failedPhase, stopped);
     return {
         ...terminalProvider,
         ...stopped,
@@ -66,6 +44,31 @@ function terminalDiagnostic(events) {
         details: stopped.details,
         failureDetails: terminalProvider.details,
     };
+}
+const PROVIDER_EVENTS = [
+    'provider_started',
+    'provider_failed',
+    'provider_completed',
+    'provider_recovered',
+    'provider_accounting_failed',
+];
+/**
+ * The provider failure behind a phase that failed on provider or execution: the phase's last
+ * provider event, when it failed or returned a response the run rejected. A later successful
+ * request, recovery, or new request must not blame an earlier failure.
+ */
+function blamedProviderFailure(phaseEvents, failedPhase, stopped) {
+    const provider = phaseEvents.findLast((event) => PROVIDER_EVENTS.includes(event.kind));
+    if (failedPhase?.code !== 'provider_or_execution_failed' || !provider) return {};
+    const samePhase =
+        provider.data?.phase === failedPhase.phase &&
+        provider.data?.attempt === failedPhase.attempt &&
+        provider.data?.workUnitId === failedPhase.workUnitId;
+    const responseRejected = (stopped.details?.causes ?? []).some((code) =>
+        ['AI_JSONParseError', 'AI_TypeValidationError'].includes(code),
+    );
+    const failed = provider.kind === 'provider_failed' || (provider.kind === 'provider_completed' && responseRejected);
+    return failed && samePhase ? provider.data : {};
 }
 function diagnosticLines(text) {
     const events = [];

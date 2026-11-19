@@ -114,24 +114,10 @@ export async function demonstrateSource(api) {
             readBytes: 4096,
             timeoutMs: 60_000,
         });
-        const changes = [];
-        let request = {};
-        let diffPages = 0;
-        do {
-            const page = await source.changes(request);
-            diffPages++;
-            changes.push(...page.items);
-            request = page.next;
-        } while (request);
-        const pathEntries = [];
-        request = { side: 'head' };
-        let listPages = 0;
-        do {
-            const page = await source.list(request);
-            listPages++;
-            pathEntries.push(...page.items);
-            request = page.next;
-        } while (request);
+        const { items: changes, pages: diffPages } = await allPages((request) => source.changes(request), {});
+        const { items: pathEntries, pages: listPages } = await allPages((request) => source.list(request), {
+            side: 'head',
+        });
         assert.equal(new Set(pathEntries.map((entry) => entry.path)).size, pathEntries.length);
         assert.deepEqual(
             pathEntries.map((entry) => entry.path).sort(),
@@ -151,98 +137,28 @@ export async function demonstrateSource(api) {
         assert.deepEqual([...actualChanged].sort(), expectedChanged);
         assert.equal(changes.filter((change) => change.kind === 'rename').length, 1);
         assert(!actualChanged.has('lib/policy.ts'));
-        const discovery = await source.search({ side: 'head', literal: 'function authorize' });
-        // This fixture places the supporting path after generated files: continue even empty match pages.
-        let supportingMatch = discovery.items[0],
-            continuation = discovery.next;
-        while (!supportingMatch && continuation) {
-            const page = await source.search({ side: 'head', literal: 'function authorize', cursor: continuation });
-            supportingMatch = page.items[0];
-            continuation = page.next;
-        }
+        const supportingMatch = await findSupporting(source);
         assert.equal(supportingMatch.entry.path, 'lib/policy.ts');
         const supportingRead = await source.read({ side: 'head', path: supportingMatch.entry.path });
         assert.equal(supportingRead.fragments.map((fragment) => fragment.text).join(''), fixture.supporting);
-        const matches = [];
-        let cursor;
-        let searchPages = 0;
-        const skipped = new Map();
-        do {
-            const page = await source.search({ side: 'head', literal: 'NEEDLE', ...(cursor ? { cursor } : {}) });
-            searchPages++;
-            matches.push(...page.items);
-            for (const item of page.skipped) skipped.set(item.entry.path, item.reason);
-            cursor = page.next;
-        } while (cursor);
-        const expectedMatches = [];
-        for (const [path, text] of fixture.after)
-            if (typeof text === 'string') {
-                text.split('\n').forEach((line, index) => {
-                    for (let column = line.indexOf('NEEDLE'); column >= 0; column = line.indexOf('NEEDLE', column + 1))
-                        expectedMatches.push(`${path}:${index + 1}:${column}`);
-                });
-            }
+        const { matches, pages: searchPages, skipped } = await searchAll(source, 'NEEDLE');
         const matchKeys = matches.map((match) => `${match.entry.path}:${match.line}:${match.column}`);
         assert.equal(new Set(matchKeys).size, matchKeys.length);
-        assert.deepEqual(matchKeys.sort(), expectedMatches.sort());
-        let readPages = 0;
-        const fragments = [];
-        request = { side: 'head', path: 'generated/long.txt' };
-        do {
-            const page = await source.read(request);
-            readPages++;
-            fragments.push(...page.fragments);
-            assert(
-                Buffer.byteLength(page.fragments.map((fragment) => fragment.text).join('')) <= source.limits.readBytes,
-            );
-            request = page.next;
-        } while (request);
-        let line = 1,
-            column = 0;
-        for (const fragment of fragments) {
-            assert.equal(fragment.line, line);
-            assert.equal(fragment.column, column);
-            for (const char of fragment.text) {
-                if (char === '\n') {
-                    line++;
-                    column = 0;
-                } else column += char.length;
-            }
-        }
+        assert.deepEqual(matchKeys.sort(), expectedNeedleMatches(fixture.after).sort());
+        const { items: fragments, pages: readPages } = await allPages(
+            async (request) => {
+                const page = await source.read(request);
+                assert(
+                    Buffer.byteLength(page.fragments.map((fragment) => fragment.text).join('')) <=
+                        source.limits.readBytes,
+                );
+                return { items: page.fragments, next: page.next };
+            },
+            { side: 'head', path: 'generated/long.txt' },
+        );
+        assertContiguous(fragments);
         assert.equal(fragments.map((fragment) => fragment.text).join(''), fixture.after.get('generated/long.txt'));
-        // Move HEAD and dirty both index/worktree after capture, then use the same operations again.
-        fixture.git('switch', '-qc', 'later');
-        fixture.write('caller.ts', 'later committed caller\n');
-        fixture.git('-c', 'core.fsmonitor=false', 'add', 'caller.ts');
-        fixture.git('commit', '-qm', 'later branch');
-        fixture.write('lib/policy.ts', 'staged changed policy\n');
-        fixture.git('-c', 'core.fsmonitor=false', 'add', 'lib/policy.ts');
-        fixture.write('lib/policy.ts', 'dirty changed policy\n');
-        fixture.write('.gitattributes', '*.ts -diff\n');
-        fixture.write('diff-order.txt', 'new name.ts\ncaller.ts\n');
-        fixture.git('config', 'diff.orderFile', join(fixture.root, 'diff-order.txt'));
-        fixture.git('config', 'diff.relative', 'true');
-        assert.equal(
-            (await source.read({ side: 'head', path: 'lib/policy.ts' })).fragments
-                .map((fragment) => fragment.text)
-                .join(''),
-            fixture.supporting,
-        );
-        assert.equal(
-            (await source.read({ side: 'base', path: 'caller.ts' })).fragments
-                .map((fragment) => fragment.text)
-                .join(''),
-            fixture.before.get('caller.ts'),
-        );
-        const frozenChanges = [];
-        request = {};
-        do {
-            const page = await source.changes(request);
-            frozenChanges.push(...page.items);
-            request = page.next;
-        } while (request);
-        assert.deepEqual(frozenChanges, changes);
-        assert.throws(() => readFileSync(join(fixture.root, 'EXECUTED')));
+        await assertFrozenAfterLaterChanges(source, fixture, changes);
         return {
             pinned: { base: artifact.base, head: artifact.head },
             limits: source.limits,
@@ -264,6 +180,105 @@ export async function demonstrateSource(api) {
     } finally {
         fixture.cleanup();
     }
+}
+
+/** Follow `next` cursors until exhausted, counting pages. */
+async function allPages(fetchPage, first) {
+    const items = [];
+    let pages = 0;
+    let request = first;
+    do {
+        const page = await fetchPage(request);
+        pages++;
+        items.push(...page.items);
+        request = page.next;
+    } while (request);
+    return { items, pages };
+}
+
+/** This fixture places the supporting path after generated files: continue even empty match pages. */
+async function findSupporting(source) {
+    const discovery = await source.search({ side: 'head', literal: 'function authorize' });
+    let supportingMatch = discovery.items[0],
+        continuation = discovery.next;
+    while (!supportingMatch && continuation) {
+        const page = await source.search({ side: 'head', literal: 'function authorize', cursor: continuation });
+        supportingMatch = page.items[0];
+        continuation = page.next;
+    }
+    return supportingMatch;
+}
+
+async function searchAll(source, literal) {
+    const matches = [];
+    const skipped = new Map();
+    let cursor;
+    let pages = 0;
+    do {
+        const page = await source.search({ side: 'head', literal, ...(cursor ? { cursor } : {}) });
+        pages++;
+        matches.push(...page.items);
+        for (const item of page.skipped) skipped.set(item.entry.path, item.reason);
+        cursor = page.next;
+    } while (cursor);
+    return { matches, pages, skipped };
+}
+
+/** Every `NEEDLE` occurrence in the head text files, as `path:line:column`. */
+function expectedNeedleMatches(files) {
+    const expected = [];
+    for (const [path, text] of files)
+        if (typeof text === 'string') {
+            text.split('\n').forEach((line, index) => {
+                for (let column = line.indexOf('NEEDLE'); column >= 0; column = line.indexOf('NEEDLE', column + 1))
+                    expected.push(`${path}:${index + 1}:${column}`);
+            });
+        }
+    return expected;
+}
+
+/** Each fragment starts exactly where the previous one ended. */
+function assertContiguous(fragments) {
+    let line = 1,
+        column = 0;
+    for (const fragment of fragments) {
+        assert.equal(fragment.line, line);
+        assert.equal(fragment.column, column);
+        for (const char of fragment.text) {
+            if (char === '\n') {
+                line++;
+                column = 0;
+            } else column += char.length;
+        }
+    }
+}
+
+/** Move HEAD and dirty both index/worktree after capture, then use the same operations again. */
+async function assertFrozenAfterLaterChanges(source, fixture, changes) {
+    fixture.git('switch', '-qc', 'later');
+    fixture.write('caller.ts', 'later committed caller\n');
+    fixture.git('-c', 'core.fsmonitor=false', 'add', 'caller.ts');
+    fixture.git('commit', '-qm', 'later branch');
+    fixture.write('lib/policy.ts', 'staged changed policy\n');
+    fixture.git('-c', 'core.fsmonitor=false', 'add', 'lib/policy.ts');
+    fixture.write('lib/policy.ts', 'dirty changed policy\n');
+    fixture.write('.gitattributes', '*.ts -diff\n');
+    fixture.write('diff-order.txt', 'new name.ts\ncaller.ts\n');
+    fixture.git('config', 'diff.orderFile', join(fixture.root, 'diff-order.txt'));
+    fixture.git('config', 'diff.relative', 'true');
+    assert.equal(
+        (await source.read({ side: 'head', path: 'lib/policy.ts' })).fragments
+            .map((fragment) => fragment.text)
+            .join(''),
+        fixture.supporting,
+    );
+    assert.equal(
+        (await source.read({ side: 'base', path: 'caller.ts' })).fragments.map((fragment) => fragment.text).join(''),
+        fixture.before.get('caller.ts'),
+    );
+    const { items: frozenChanges } = await allPages((request) => source.changes(request), {});
+    assert.deepEqual(frozenChanges, changes);
+    assert.throws(() => readFileSync(join(fixture.root, 'EXECUTED')));
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

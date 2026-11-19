@@ -287,52 +287,6 @@ export function deriveAssessmentCitations(input: unknown, entries: AssessmentEnt
     };
     return candidate;
 }
-export class AssessmentAccumulator {
-    private readonly accepted = new Map<string, AssessmentProposal>();
-    constructor(
-        private readonly entries: AssessmentEntry[],
-        private readonly ledger: EvidenceLedger,
-        private readonly structured: Record<string, Array<{ path: string; value: unknown }>> = {},
-        seed: AssessmentProposal[] = [],
-    ) {
-        for (const proposal of seed) {
-            const validated = revalidateProposal(proposal, entries, ledger, structured);
-            if (this.accepted.has(validated.result.assessmentId)) throw new Error('assessment_coverage_mismatch');
-            this.accepted.set(validated.result.assessmentId, validated);
-        }
-    }
-    submit(input: unknown): AssessmentProgress {
-        const candidate = deriveAssessmentCitations(input, this.entries);
-        const id = candidate.result.assessmentId;
-        if (!this.entries.some((e) => e.assessmentId === id)) throw new Error('foreign_assessment_id');
-        if (this.accepted.has(id))
-            return {
-                complete: this.remaining().length === 0,
-                newlyAccepted: [],
-                alreadyAccepted: [id],
-                remaining: this.remaining(),
-            };
-        this.accepted.set(
-            id,
-            validateAssessmentSubmission({ assessments: [candidate] }, this.entries, this.ledger, this.structured),
-        );
-        return {
-            complete: this.remaining().length === 0,
-            newlyAccepted: [id],
-            alreadyAccepted: [],
-            remaining: this.remaining(),
-        };
-    }
-    remaining() {
-        return this.entries.filter((e) => !this.accepted.has(e.assessmentId)).map((e) => e.assessmentId);
-    }
-    snapshot(): AssessmentProposal[] {
-        return this.entries.flatMap((e) => {
-            const p = this.accepted.get(e.assessmentId);
-            return p ? [structuredClone(p)] : [];
-        });
-    }
-}
 export type AssessmentProgress = {
     complete: boolean;
     newlyAccepted: string[];
@@ -365,7 +319,7 @@ export type AssessmentFinding = {
     proposedReplacement?: z.infer<typeof replacementSchema> & { verified: boolean };
     verified: boolean;
 };
-export type AssessmentFollowUp = Omit<z.infer<typeof followUpSchema>, 'kind' | 'passage' | 'sourceRefs'> & {
+type AssessmentFollowUp = Omit<z.infer<typeof followUpSchema>, 'kind' | 'passage' | 'sourceRefs'> & {
     // Only independent concern projection creates external evidence follow-ups.
     kind: 'human_check' | 'operational_check' | 'external_evidence';
     externalEvidence?: {

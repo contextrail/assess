@@ -15,7 +15,9 @@ Look up a specific setting here. For a first integration, use [GitHub Actions se
 | `provider`, `model`                    | Required `openai` or `openrouter` and explicit provider-native model. No fallback.                                                                                |
 | `enforcement`                          | `advisory` (default), `required`, or `strict`. See the [outcome table](review-results.md#interpret-judgments-and-exit-codes); execution failures always return 2. |
 | `effort`                               | Optional CLI effort; empty delegates to provider default.                                                                                                         |
+| `speed`                                | `normal` (default), `fast` or `ultrafast` provider service tier. Unsupported tiers are logged and the run continues.                                              |
 | `max-time-ms`                          | Required positive workflow model deadline, at most 2147483647 ms. Does not bound total job time.                                                                  |
+| `max-verify-calls`                     | Optional model calls per finding verification; empty uses the package default (12). See [extended capacity](../README.md#give-large-pull-requests-more-capacity). |
 | `feedback`                             | `send` (default) or `off`; CLI owns report submission and its status.                                                                                             |
 | `repository-attribution`               | `true` or `false` (default); explicitly includes repository identity in CLI retrieval/reporting.                                                                  |
 | `artifact-retention-days`              | 1–90, default 7, within repository/organization retention policy.                                                                                                 |

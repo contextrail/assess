@@ -146,30 +146,11 @@ export function parsePrContext(value: unknown, artifact: GitIdentity, reviewer: 
     try {
         if (Buffer.byteLength(JSON.stringify(value)) > MAX_PR_CONTEXT_BYTES) throw new Error();
         const context = prContextSchema.parse(value);
-        if (
-            context.comparison.base !== artifact.base.commit ||
-            context.comparison.head !== artifact.head.commit ||
-            context.reviewer !== reviewer ||
-            (context.version === 2 &&
-                context.observedChecks !== undefined &&
-                context.observedChecks.head !== context.comparison.head)
-        )
-            throw new Error();
-        for (const item of context.discussion.items) {
-            const url = new URL(item.url);
-            if (
-                url.search ||
-                ![`/${context.repository}/pull/${context.pr}`, `/${context.repository}/issues/${context.pr}`].includes(
-                    url.pathname,
-                )
-            )
-                throw new Error();
-        }
         const repository = artifact.repositoryEnvironment;
         if (
-            repository.status === 'reported' &&
-            (repository.provider !== 'github.com' ||
-                context.repository.toLowerCase() !== `${repository.owner}/${repository.name}`.toLowerCase())
+            !bindsArtifact(context, artifact, reviewer) ||
+            !discussionStaysOnPr(context) ||
+            !matchesReportedRepository(context, repository)
         )
             throw new Error();
         if (
@@ -187,6 +168,38 @@ export function parsePrContext(value: unknown, artifact: GitIdentity, reviewer: 
         throw new Error('invalid_pr_context');
     }
 }
+/** The context describes this exact comparison and reviewer, and any observed checks ran on its head. */
+function bindsArtifact(context: PrContext, artifact: GitIdentity, reviewer: string): boolean {
+    return (
+        context.comparison.base === artifact.base.commit &&
+        context.comparison.head === artifact.head.commit &&
+        context.reviewer === reviewer &&
+        !(
+            context.version === 2 &&
+            context.observedChecks !== undefined &&
+            context.observedChecks.head !== context.comparison.head
+        )
+    );
+}
+
+/** Discussion links point only at this PR's own pull or issue page, without query strings. */
+function discussionStaysOnPr(context: PrContext): boolean {
+    const pages = [`/${context.repository}/pull/${context.pr}`, `/${context.repository}/issues/${context.pr}`];
+    return context.discussion.items.every((item) => {
+        const url = new URL(item.url);
+        return !url.search && pages.includes(url.pathname);
+    });
+}
+
+/** A reported repository origin must be this GitHub repository. */
+function matchesReportedRepository(context: PrContext, repository: GitIdentity['repositoryEnvironment']): boolean {
+    return (
+        repository.status !== 'reported' ||
+        (repository.provider === 'github.com' &&
+            context.repository.toLowerCase() === `${repository.owner}/${repository.name}`.toLowerCase())
+    );
+}
+
 export function loadPrContext(file: string, artifact: GitIdentity, reviewer: string): PrContext {
     let fd: number | undefined;
     try {

@@ -34,9 +34,34 @@ export async function promoteRelease({
     pause = setTimeout,
 }) {
     const selected = releaseChannel(release);
+    assertPromotionRequest(release, { sha, ref, repo, token });
+    const api = githubApi(token, fetcher);
+    // The immutable version tag must still identify the commit checked by the publisher.
+    const exact = await api(`commits/${encodeURIComponent(ref)}`);
+    if (exact?.sha !== sha) throw new Error('Release tag moved');
+    const current = await api(`git/ref/tags/${selected.tag}`);
+    if (current) {
+        const settled = await settledByCurrentChannel(api, current, selected, sha);
+        if (settled) return settled;
+    }
+    if (!(await registryServes(release.version, fetcher, pause)))
+        throw new Error('Package still unavailable; release channel unchanged. Retry the promotion job later.');
+    const result = current
+        ? await api(`git/refs/tags/${selected.tag}`, 'PATCH', { sha, force: true })
+        : await api('git/refs', 'POST', { ref: `refs/tags/${selected.tag}`, sha });
+    if (result?.object?.sha !== sha) throw new Error('Release channel update was not confirmed');
+    return { status: 'promoted', tag: selected.tag, sha };
+}
+
+/** Only the public repository's exact version tag, at a full commit, with a token may promote. */
+function assertPromotionRequest(release, { sha, ref, repo, token }) {
     if (repo !== repository || !shaPattern.test(sha) || ref !== `v${release.version}` || !token)
         throw new Error('Promotion requires the exact public release tag and commit');
-    const api = async (path, method = 'GET', body) => {
+}
+
+/** GitHub REST calls for the release repository; a missing resource on GET reads as null. */
+function githubApi(token, fetcher) {
+    return async (path, method = 'GET', body) => {
         const response = await fetcher(`https://api.github.com/repos/${repository}/${path}`, {
             method,
             redirect: 'error',
@@ -52,61 +77,63 @@ export async function promoteRelease({
         if (!response.ok) throw new Error(`Release API failed: ${method} ${path} (${response.status})`);
         return response.json();
     };
-    // The immutable version tag must still identify the commit checked by the publisher.
-    const exact = await api(`commits/${encodeURIComponent(ref)}`);
-    if (exact?.sha !== sha) throw new Error('Release tag moved');
-    const current = await api(`git/ref/tags/${selected.tag}`);
-    if (current) {
-        if (current.object?.type !== 'commit' || !shaPattern.test(current.object.sha))
-            throw new Error('Expected a lightweight release channel tag');
-        const file = await api(`contents/release.json?ref=${current.object.sha}`);
-        if (file?.encoding !== 'base64') throw new Error('Current channel release is unavailable');
-        const previous = releaseChannel(JSON.parse(Buffer.from(file.content, 'base64').toString('utf8')));
-        if (previous.tag !== selected.tag) throw new Error('Current channel identity mismatch');
-        const differing = previous.order.findIndex((value, index) => value !== selected.order[index]);
-        if (differing < 0) {
-            if (current.object.sha !== sha) throw new Error('Same release version has different commits');
-            return { status: 'unchanged', tag: selected.tag, sha };
-        }
-        if (previous.order[differing] > selected.order[differing])
-            return { status: 'skipped_older', tag: selected.tag, sha: current.object.sha };
+}
+
+/**
+ * The channel's current release decides the outcome when it is this version (unchanged) or a
+ * newer one (skipped); otherwise promotion continues.
+ */
+async function settledByCurrentChannel(api, current, selected, sha) {
+    if (current.object?.type !== 'commit' || !shaPattern.test(current.object.sha))
+        throw new Error('Expected a lightweight release channel tag');
+    const file = await api(`contents/release.json?ref=${current.object.sha}`);
+    if (file?.encoding !== 'base64') throw new Error('Current channel release is unavailable');
+    const previous = releaseChannel(JSON.parse(Buffer.from(file.content, 'base64').toString('utf8')));
+    if (previous.tag !== selected.tag) throw new Error('Current channel identity mismatch');
+    const differing = previous.order.findIndex((value, index) => value !== selected.order[index]);
+    if (differing < 0) {
+        if (current.object.sha !== sha) throw new Error('Same release version has different commits');
+        return { status: 'unchanged', tag: selected.tag, sha };
     }
-    // npm validation can outlast `npm publish`; neither metadata nor a queued upload is enough.
-    let available = false;
+    if (previous.order[differing] > selected.order[differing])
+        return { status: 'skipped_older', tag: selected.tag, sha: current.object.sha };
+    return null;
+}
+
+/** npm validation can outlast `npm publish`; neither metadata nor a queued upload is enough. */
+async function registryServes(version, fetcher, pause) {
     for (let attempt = 0; attempt < 20; attempt++) {
-        const response = await fetcher(`https://registry.npmjs.org/@contextrail%2fassess/${release.version}`, {
-            redirect: 'error',
-            signal: globalThis.AbortSignal.timeout(30000),
-        });
-        if (response.ok) {
-            const pkg = await response.json();
-            if (
-                pkg.name !== packageName ||
-                pkg.version !== release.version ||
-                pkg.dist?.tarball !==
-                    `https://registry.npmjs.org/@contextrail/assess/-/assess-${release.version}.tgz` ||
-                typeof pkg.dist.integrity !== 'string'
-            )
-                throw new Error('Registry package identity mismatch');
-            const tarball = await fetcher(pkg.dist.tarball, {
-                method: 'HEAD',
-                redirect: 'error',
-                signal: globalThis.AbortSignal.timeout(30000),
-            });
-            available = tarball.ok;
-            if (!available && tarball.status !== 404)
-                throw new Error(`Registry tarball unavailable (${tarball.status})`);
-        } else if (response.status !== 404) throw new Error(`Registry unavailable (${response.status})`);
-        if (available) break;
+        if (await tarballAvailable(version, fetcher)) return true;
         if (attempt < 19) await pause(15000);
     }
-    if (!available)
-        throw new Error('Package still unavailable; release channel unchanged. Retry the promotion job later.');
-    const result = current
-        ? await api(`git/refs/tags/${selected.tag}`, 'PATCH', { sha, force: true })
-        : await api('git/refs', 'POST', { ref: `refs/tags/${selected.tag}`, sha });
-    if (result?.object?.sha !== sha) throw new Error('Release channel update was not confirmed');
-    return { status: 'promoted', tag: selected.tag, sha };
+    return false;
+}
+
+/** The registry lists exactly this package version and serves its tarball; a 404 means not yet. */
+async function tarballAvailable(version, fetcher) {
+    const response = await fetcher(`https://registry.npmjs.org/@contextrail%2fassess/${version}`, {
+        redirect: 'error',
+        signal: globalThis.AbortSignal.timeout(30000),
+    });
+    if (!response.ok) {
+        if (response.status !== 404) throw new Error(`Registry unavailable (${response.status})`);
+        return false;
+    }
+    const pkg = await response.json();
+    if (
+        pkg.name !== packageName ||
+        pkg.version !== version ||
+        pkg.dist?.tarball !== `https://registry.npmjs.org/@contextrail/assess/-/assess-${version}.tgz` ||
+        typeof pkg.dist.integrity !== 'string'
+    )
+        throw new Error('Registry package identity mismatch');
+    const tarball = await fetcher(pkg.dist.tarball, {
+        method: 'HEAD',
+        redirect: 'error',
+        signal: globalThis.AbortSignal.timeout(30000),
+    });
+    if (!tarball.ok && tarball.status !== 404) throw new Error(`Registry tarball unavailable (${tarball.status})`);
+    return tarball.ok;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

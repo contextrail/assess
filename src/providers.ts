@@ -1,4 +1,4 @@
-import { wrapLanguageModel } from 'ai';
+import { wrapLanguageModel, type LanguageModelMiddleware } from 'ai';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createOpenAI } from '@ai-sdk/openai';
 
@@ -168,28 +168,7 @@ export function recoverProviderCalls(
                     params.abortSignal?.throwIfAborted();
                     let response: Awaited<ReturnType<typeof underlying.doGenerate>>;
                     try {
-                        const timeout = new AbortController();
-                        const timer = setTimeout(() => timeout.abort(new ProviderRequestTimeout()), 180_000);
-                        const signals = [signal, params.abortSignal, timeout.signal].filter(
-                            (value): value is AbortSignal => value !== undefined,
-                        );
-                        try {
-                            response = await underlying.doGenerate({
-                                ...params,
-                                abortSignal: AbortSignal.any(signals),
-                            });
-                        } catch (error) {
-                            if (
-                                timeout.signal.aborted &&
-                                !signal.aborted &&
-                                !params.abortSignal?.aborted &&
-                                !accountingFailure(error)
-                            )
-                                throw new ProviderRequestTimeout();
-                            throw error;
-                        } finally {
-                            clearTimeout(timer);
-                        }
+                        response = await generateOnce(underlying, params, signal);
                     } catch (error) {
                         if (signal.aborted || params.abortSignal?.aborted || !recoverableProviderError(error))
                             throw error;
@@ -209,6 +188,34 @@ export function recoverProviderCalls(
             },
         },
     });
+}
+
+/**
+ * One provider request bounded at 180 seconds. Only a timeout this bound caused, not caller
+ * cancellation or an accounting failure, becomes a `ProviderRequestTimeout`.
+ */
+async function generateOnce(
+    underlying: Parameters<NonNullable<LanguageModelMiddleware['wrapGenerate']>>[0]['model'],
+    params: Parameters<NonNullable<LanguageModelMiddleware['wrapGenerate']>>[0]['params'],
+    signal: AbortSignal,
+) {
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(new ProviderRequestTimeout()), 180_000);
+    const signals = [signal, params.abortSignal, timeout.signal].filter(
+        (value): value is AbortSignal => value !== undefined,
+    );
+    try {
+        return await underlying.doGenerate({
+            ...params,
+            abortSignal: AbortSignal.any(signals),
+        });
+    } catch (error) {
+        if (timeout.signal.aborted && !signal.aborted && !params.abortSignal?.aborted && !accountingFailure(error))
+            throw new ProviderRequestTimeout();
+        throw error;
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 function accountingFailure(error: unknown): boolean {

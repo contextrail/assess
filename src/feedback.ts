@@ -47,6 +47,34 @@ function externalEvidenceCounts(state: AssessmentState, assessmentId: string) {
     }
     return Object.values(counts).some((count) => count > 0) ? { externalEvidence: counts } : {};
 }
+/** Local stop reasons in the published report vocabulary; anything unlisted reports as an execution error. */
+const REPORTED_STOP_REASONS: Record<string, ReviewReportInput['stopReason']> = {
+    finished: 'finished',
+    preparation_incomplete: 'preparation_incomplete',
+    cancelled: 'cancelled',
+    max_time_ms: 'timeout',
+    max_turns: 'max_turns',
+    model_call_limit: 'max_turns',
+    max_total_tokens: 'max_total_tokens',
+    usage_unavailable: 'usage_unavailable',
+    provider_error: 'provider_error',
+    execution_error: 'execution_error',
+    report_delivery_failed: 'report_delivery_failed',
+    per_call_output_limit: 'output_limit',
+    model_stopped: 'model_stopped',
+    total_token_limit_unmeasurable: 'usage_unavailable',
+};
+
+/** Repository identity is reported only with explicit attribution. */
+function reportedRepository(
+    repository: AssessmentState['artifact']['repositoryEnvironment'],
+    attribution: boolean,
+): ReviewReportInput['repository'] {
+    if (!attribution) return { status: 'unavailable', reason: 'withheld' };
+    return repository.status === 'reported'
+        ? { status: 'reported', provider: repository.provider, owner: repository.owner, name: repository.name }
+        : { status: 'unavailable', reason: repository.reason };
+}
 /** Construct from the allowlist. Never serialize local state then remove fields. */
 export function projectAssessmentReport(state: AssessmentState, repositoryAttribution = false): ReviewReportInput {
     if (!state.reviewer || !state.decision || state.assessmentStatus === 'running')
@@ -55,23 +83,6 @@ export function projectAssessmentReport(state: AssessmentState, repositoryAttrib
     const phaseProviders = Object.values(e.phaseModels ?? { shared: e.requested });
     const providers = new Set(phaseProviders.map((profile) => profile.provider));
     const models = new Set(phaseProviders.map((profile) => profile.model));
-    const stop: Record<string, ReviewReportInput['stopReason']> = {
-        finished: 'finished',
-        preparation_incomplete: 'preparation_incomplete',
-        cancelled: 'cancelled',
-        max_time_ms: 'timeout',
-        max_turns: 'max_turns',
-        model_call_limit: 'max_turns',
-        max_total_tokens: 'max_total_tokens',
-        usage_unavailable: 'usage_unavailable',
-        provider_error: 'provider_error',
-        execution_error: 'execution_error',
-        report_delivery_failed: 'report_delivery_failed',
-        per_call_output_limit: 'output_limit',
-        model_stopped: 'model_stopped',
-        total_token_limit_unmeasurable: 'usage_unavailable',
-    };
-    const repository = state.artifact.repositoryEnvironment;
     return reviewReportInputSchema.parse({
         kind: 'review_report',
         contractVersion: 1,
@@ -80,11 +91,7 @@ export function projectAssessmentReport(state: AssessmentState, repositoryAttrib
         packageVersion,
         methodVersion: state.concernValidation ? 'candidate-adherence-v3' : 'artifact-review-v1',
         reviewer: { nodeId: state.reviewer.nodeId, version: state.reviewer.version },
-        repository: repositoryAttribution
-            ? repository.status === 'reported'
-                ? { status: 'reported', provider: repository.provider, owner: repository.owner, name: repository.name }
-                : { status: 'unavailable', reason: repository.reason }
-            : { status: 'unavailable', reason: 'withheld' },
+        repository: reportedRepository(state.artifact.repositoryEnvironment, repositoryAttribution),
         scope: {
             enumeration: state.preparationStatus === 'prepared' ? 'complete' : 'incomplete',
             expectedCount: state.expectedContextCount,
@@ -113,7 +120,7 @@ export function projectAssessmentReport(state: AssessmentState, repositoryAttrib
         },
         completion: state.assessmentStatus,
         ...(state.concernValidation ? { concernValidation: state.concernValidation } : {}),
-        stopReason: stop[e.stopReason ?? ''] ?? 'execution_error',
+        stopReason: REPORTED_STOP_REASONS[e.stopReason ?? ''] ?? 'execution_error',
         telemetry: {
             durationMs: e.elapsedMs,
             provider: providers.size === 1 ? phaseProviders[0]!.provider : null,

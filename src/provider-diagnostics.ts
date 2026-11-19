@@ -159,14 +159,7 @@ function nonnegativeInteger(value: unknown): number | null {
 }
 /** Count the serialized wire request without retaining input, tool descriptions, schema properties or model IDs. */
 export function providerRequestDiagnostics(body: unknown) {
-    const text =
-        typeof body === 'string' ? body : body instanceof Uint8Array ? Buffer.from(body).toString('utf8') : null;
-    const requestBytes =
-        typeof body === 'string'
-            ? Buffer.byteLength(body, 'utf8')
-            : body instanceof Uint8Array
-              ? body.byteLength
-              : null;
+    const { text, requestBytes } = decodedBody(body);
     const parsed = parseBody(text, requestBytesLimit);
     const value = parsed.value;
     const messages = value?.messages ?? value?.input;
@@ -175,22 +168,32 @@ export function providerRequestDiagnostics(body: unknown) {
         requestBytes,
         messageCount: Array.isArray(messages) ? messages.length : null,
         toolCount: Array.isArray(tools) ? tools.length : null,
-        toolSchemaBytes: Array.isArray(tools)
-            ? Buffer.byteLength(
-                  JSON.stringify(
-                      tools.map((tool) => {
-                          const entry = object(tool);
-                          return object(entry?.function)?.parameters ?? entry?.parameters ?? null;
-                      }),
-                  ),
-                  'utf8',
-              )
-            : null,
+        toolSchemaBytes: Array.isArray(tools) ? toolSchemaBytes(tools) : null,
         maxOutputTokens: nonnegativeInteger(
             value?.max_output_tokens ?? value?.max_completion_tokens ?? value?.max_tokens,
         ),
         requestFormat: text === null ? 'unavailable' : parsed.format,
     };
+}
+
+/** Only string and byte bodies are readable; a stream or form body reports neither text nor size. */
+function decodedBody(body: unknown): { text: string | null; requestBytes: number | null } {
+    if (typeof body === 'string') return { text: body, requestBytes: Buffer.byteLength(body, 'utf8') };
+    if (body instanceof Uint8Array) return { text: Buffer.from(body).toString('utf8'), requestBytes: body.byteLength };
+    return { text: null, requestBytes: null };
+}
+
+/** Size of the tool parameter schemas alone, in either the chat or the responses tool shape. */
+function toolSchemaBytes(tools: unknown[]): number {
+    return Buffer.byteLength(
+        JSON.stringify(
+            tools.map((tool) => {
+                const entry = object(tool);
+                return object(entry?.function)?.parameters ?? entry?.parameters ?? null;
+            }),
+        ),
+        'utf8',
+    );
 }
 
 /** Transport diagnoses are observed exception codes, never inferred from arbitrary error prose. */

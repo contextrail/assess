@@ -59,6 +59,7 @@ import {
     type AssessmentProvider,
     type ProviderFailureCode,
 } from './providers.js';
+import { speedFetch, type ProviderSpeed } from './speed.js';
 import { FixedSnapshotSource, SourceAccessError, type SourceLimits } from './source.js';
 import { publicationSchema, type Publication } from './contracts.js';
 import { createPhaseRecord, validatePhaseRecord, type PhaseRecord } from './phases.js';
@@ -66,6 +67,7 @@ import {
     AssessmentBudget,
     BudgetStop,
     DEFAULT_EXECUTION_LIMITS,
+    DEFAULT_VERIFY_CALLS,
     type ExecutionLimits,
     type ModelPhase,
 } from './budget.js';
@@ -226,6 +228,7 @@ type AssessmentOptions = {
     prContext?: PrContext;
     signal?: AbortSignal;
     fetch?: typeof fetch;
+    speed?: ProviderSpeed;
     feedback?: 'send' | 'off';
     feedbackSender?: AssessmentFeedbackSender;
     repositoryAttribution?: boolean;
@@ -300,41 +303,41 @@ function restoreCheckpoint(
     ledger: EvidenceLedger,
 ) {
     const { prepared } = options;
-    if (options.resume) {
-        const loaded = loadAssessmentCheckpoint(directory, {
-            artifact: prepared.state.artifact,
-            reviewerId: prepared.state.requestedReviewerId,
-        });
-        if (
-            digest(loaded.checkpoint) !== digest(options.resume) ||
-            digest(loaded.prepared.state) !== digest(prepared.state)
-        )
-            throw new Error('resume_checkpoint_changed');
-        const old = options.resume.state;
-        if (
-            old.phases.some((p) => p.phase === 'assess' && p.configuration.promptVersion !== 'candidate-observation-v3')
-        )
-            throw Error('resume_method_changed_start_new_assessment');
-        if (
-            old.runId !== state.runId ||
-            digest(old.artifact) !== digest(state.artifact) ||
-            old.scopeIdentity !== state.scopeIdentity ||
-            digest(old.execution.phaseModels) !== digest(state.execution.phaseModels) ||
-            digest(old.execution.sourceLimits) !== digest(state.execution.sourceLimits) ||
-            digest(old.execution.policy) !== digest(state.execution.policy) ||
-            old.execution.purpose !== state.execution.purpose ||
-            old.execution.prContext?.hash !== state.execution.prContext?.hash
-        )
-            throw new Error('resume_configuration_changed');
-        state.phases = structuredClone(old.phases);
-        state.execution.usage = structuredClone(old.execution.usage);
-        state.execution.providerUsage = structuredClone(old.execution.providerUsage);
-        state.execution.returnedIdentities = structuredClone(old.execution.returnedIdentities);
-        state.execution.calls = old.execution.calls;
-        state.execution.steps = old.execution.steps;
-        for (const record of Object.values(options.resume.evidence))
-            ledger.add(record.text, record.provenance, record.fragments);
-    }
+    if (!options.resume) return;
+    const loaded = loadAssessmentCheckpoint(directory, {
+        artifact: prepared.state.artifact,
+        reviewerId: prepared.state.requestedReviewerId,
+    });
+    if (
+        digest(loaded.checkpoint) !== digest(options.resume) ||
+        digest(loaded.prepared.state) !== digest(prepared.state)
+    )
+        throw new Error('resume_checkpoint_changed');
+    const old = options.resume.state;
+    if (old.phases.some((p) => p.phase === 'assess' && p.configuration.promptVersion !== 'candidate-observation-v3'))
+        throw Error('resume_method_changed_start_new_assessment');
+    if (!sameResumeConfiguration(old, state)) throw new Error('resume_configuration_changed');
+    state.phases = structuredClone(old.phases);
+    state.execution.usage = structuredClone(old.execution.usage);
+    state.execution.providerUsage = structuredClone(old.execution.providerUsage);
+    state.execution.returnedIdentities = structuredClone(old.execution.returnedIdentities);
+    state.execution.calls = old.execution.calls;
+    state.execution.steps = old.execution.steps;
+    for (const record of Object.values(options.resume.evidence))
+        ledger.add(record.text, record.provenance, record.fragments);
+}
+/** A resumed run must be the same run: artifact, scope, models, limits, policy, purpose and PR context. */
+function sameResumeConfiguration(old: AssessmentState, state: AssessmentState): boolean {
+    return (
+        old.runId === state.runId &&
+        digest(old.artifact) === digest(state.artifact) &&
+        old.scopeIdentity === state.scopeIdentity &&
+        digest(old.execution.phaseModels) === digest(state.execution.phaseModels) &&
+        digest(old.execution.sourceLimits) === digest(state.execution.sourceLimits) &&
+        digest(old.execution.policy) === digest(state.execution.policy) &&
+        old.execution.purpose === state.execution.purpose &&
+        old.execution.prContext?.hash === state.execution.prContext?.hash
+    );
 }
 async function restorePreparationManifest(
     options: AssessmentOptions,
@@ -381,6 +384,9 @@ async function createAssessmentRuntime(options: AssessmentOptions) {
     const state = initialAssessmentState(options, source, budget, prContext, { models, logLevel, limits });
     const diagnostics = new Diagnostics(directory, state.runId, logLevel),
         ledger = new EvidenceLedger();
+    const providerFetch = speedFetch(options.fetch ?? fetch, options.speed ?? 'normal', (event) =>
+        diagnostics.event('provider_speed_unavailable', event).catch(() => undefined),
+    );
     restoreCheckpoint(options, directory, state, ledger);
     const invocationPhaseIndex = state.phases.length;
     const previousCalls = state.execution.calls,
@@ -414,6 +420,7 @@ async function createAssessmentRuntime(options: AssessmentOptions) {
         state,
         ledger,
         diagnostics,
+        providerFetch,
         persist,
         material,
         preparedManifest,
@@ -462,6 +469,20 @@ const correctionRounds = <T>(session: PhaseRuntime<T>) =>
     remainingContexts(session).length < session.remainingAtLastStep
         ? 0
         : session.rejected + Number(session.stepRejected);
+/** The manifest, publications and every completed phase on disk still match what this run recorded. */
+async function assertUpstreamUnchanged(run: AssessmentRuntime) {
+    const { state, directory, manifestHash, materialHash, prepared } = run;
+    if (
+        digest(JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'))) !== manifestHash ||
+        digest(JSON.parse(await readFile(prepared.materialPath, 'utf8'))) !== materialHash
+    )
+        throw new Error('upstream_artifact_changed');
+    for (const p of state.phases.filter((p) => p.status === 'complete')) {
+        const name = phaseFilename(p.phase, p.workUnitId, p.attempt);
+        if (digest(JSON.parse(await readFile(join(directory, 'phases', name), 'utf8'))) !== digest(p))
+            throw new Error('upstream_phase_changed');
+    }
+}
 async function createPhaseRuntime<T>(
     run: AssessmentRuntime,
     phase: 'assess' | 'verify',
@@ -472,7 +493,7 @@ async function createPhaseRuntime<T>(
     validate: (value: unknown) => T,
     attempt = 1,
 ): Promise<PhaseRuntime<T>> {
-    const { state, directory, budget, ledger, options, manifestHash, materialHash, retainedProposals, prepared } = run;
+    const { state, budget, ledger, options, manifestHash, materialHash, retainedProposals } = run;
 
     const startedAt = new Date().toISOString(),
         inputRefs = [
@@ -484,19 +505,10 @@ async function createPhaseRuntime<T>(
             { ref: `input:${phase}:${workUnitId}:${attempt}`, hash: digest(sanitizeRecord(payload)) },
         ],
         phaseCalls: number[] = [];
-    if (
-        digest(JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'))) !== manifestHash ||
-        digest(JSON.parse(await readFile(prepared.materialPath, 'utf8'))) !== materialHash
-    )
-        throw new Error('upstream_artifact_changed');
-    for (const p of state.phases.filter((p) => p.status === 'complete')) {
-        const name = phaseFilename(p.phase, p.workUnitId, p.attempt);
-        if (digest(JSON.parse(await readFile(join(directory, 'phases', name), 'utf8'))) !== digest(p))
-            throw new Error('upstream_phase_changed');
-    }
+    await assertUpstreamUnchanged(run);
     const remaining = budget.remainingMs(phase),
         controller = new AbortController();
-    if (remaining !== null && remaining <= 0) throw new BudgetStop(phase === 'verify' ? 'max_time_ms' : 'max_time_ms');
+    if (remaining !== null && remaining <= 0) throw new BudgetStop('max_time_ms');
     const timer = remaining === null ? null : setTimeout(() => controller.abort(), Math.max(1, remaining));
     const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
     let output: T | undefined;
@@ -744,53 +756,62 @@ function revalidateSummary(value: unknown, ledger: EvidenceLedger) {
     );
 }
 async function captureChangeSummary<T>(session: PhaseRuntime<T>, value: unknown) {
-    if (value === undefined || value === null) {
-        // An omitted summary contributes no update; after feedback it explicitly abandons correction.
-        session.summaryCorrection = null;
-        if (value === undefined || session.phase === 'assess' || session.run.state.changeSummary?.status === 'verified')
-            return;
-    } else session.summaryCorrection = null;
-    const { state, ledger, diagnostics } = session.run;
+    // An omitted summary contributes no update; after feedback it explicitly abandons correction.
+    session.summaryCorrection = null;
+    const { state, diagnostics } = session.run;
+    // Correction batches need not repeat an already checked summary.
+    if (
+        value === undefined ||
+        (value === null && (session.phase === 'assess' || state.changeSummary?.status === 'verified'))
+    )
+        return;
     if (session.phase === 'verify' && value === false) {
         state.changeSummary = { candidate: state.changeSummary?.candidate ?? null, accepted: null, status: 'rejected' };
         await diagnostics.event('change_summary_withdrawn', { phase: session.phase });
         return;
     }
-    // Correction batches need not repeat an already checked summary.
-    if (value === null && state.changeSummary?.status === 'verified') return;
     try {
-        const summary = value === null ? null : validateChangeSummary(resolveCitationSelections(value, ledger), ledger);
-        if (session.phase === 'assess') {
-            if (summary) state.changeSummary = { candidate: summary, accepted: null, status: 'pending' };
-        } else {
-            const accepted = state.changeSummary?.candidate ? summary : null;
-            state.changeSummary = {
-                candidate: state.changeSummary?.candidate ?? null,
-                accepted,
-                status: accepted ? 'verified' : 'rejected',
-            };
-        }
+        applySummary(session, value);
     } catch (error) {
-        session.summaryFailures++;
-        const { code, details } = submissionDiagnostics(error);
-        session.summaryCorrection = {
-            code: error instanceof Error && error.message === 'change_summary_source_required' ? error.message : code,
-            correction: submissionCorrection(error, code),
-        };
-        if (session.phase === 'verify' && state.changeSummary?.status !== 'verified')
-            state.changeSummary = {
-                candidate: state.changeSummary?.candidate ?? null,
-                accepted: null,
-                status: 'rejected',
-            };
-        await diagnostics.event('change_summary_rejected', {
-            phase: session.phase,
-            ...session.summaryCorrection,
-            details,
-            attempt: session.summaryFailures,
-            retryable: session.summaryFailures < 2,
-        });
+        await rejectSummary(session, error);
     }
+}
+/** Assess proposes a pending candidate; verify accepts it only when there was a candidate to check. */
+function applySummary<T>(session: PhaseRuntime<T>, value: unknown) {
+    const { state, ledger } = session.run;
+    const summary = value === null ? null : validateChangeSummary(resolveCitationSelections(value, ledger), ledger);
+    if (session.phase === 'assess') {
+        if (summary) state.changeSummary = { candidate: summary, accepted: null, status: 'pending' };
+        return;
+    }
+    const accepted = state.changeSummary?.candidate ? summary : null;
+    state.changeSummary = {
+        candidate: state.changeSummary?.candidate ?? null,
+        accepted,
+        status: accepted ? 'verified' : 'rejected',
+    };
+}
+async function rejectSummary<T>(session: PhaseRuntime<T>, error: unknown) {
+    const { state, diagnostics } = session.run;
+    session.summaryFailures++;
+    const { code, details } = submissionDiagnostics(error);
+    session.summaryCorrection = {
+        code: error instanceof Error && error.message === 'change_summary_source_required' ? error.message : code,
+        correction: submissionCorrection(error, code),
+    };
+    if (session.phase === 'verify' && state.changeSummary?.status !== 'verified')
+        state.changeSummary = {
+            candidate: state.changeSummary?.candidate ?? null,
+            accepted: null,
+            status: 'rejected',
+        };
+    await diagnostics.event('change_summary_rejected', {
+        phase: session.phase,
+        ...session.summaryCorrection,
+        details,
+        attempt: session.summaryFailures,
+        retryable: session.summaryFailures < 2,
+    });
 }
 function summarySubmissionFeedback<T>(session: PhaseRuntime<T>) {
     const rejected = session.summaryCorrection;
@@ -1020,7 +1041,7 @@ function createPhaseTools<T>(session: PhaseRuntime<T>) {
 }
 function createProviderFetch<T>(session: PhaseRuntime<T>): typeof fetch {
     const { run, phase, workUnitId, attempt, phaseCalls, signal } = session;
-    const { state, diagnostics, models, options, budget, persist, previousCalls } = run;
+    const { state, diagnostics, models, providerFetch, budget, persist, previousCalls } = run;
     return async (input, init) => {
         signal.throwIfAborted();
         const call = previousCalls + budget.reserve(phase);
@@ -1049,7 +1070,7 @@ function createProviderFetch<T>(session: PhaseRuntime<T>): typeof fetch {
             });
         let recorded = false;
         try {
-            const response = await (options.fetch ?? fetch)(input, init);
+            const response = await providerFetch(input, init);
             if (!response.ok) {
                 budget.record(null);
                 recorded = true;
@@ -1157,7 +1178,7 @@ async function runPhaseModel<T>(session: PhaseRuntime<T>) {
                 session.output !== undefined ||
                 session.rejected >= 3 ||
                 session.sdkStop !== null ||
-                session.phaseCalls.length >= (phase === 'assess' ? 60 : 12),
+                session.phaseCalls.length >= phaseCallLimit(session),
             prepareStep: () => {
                 session.toolsThisStep = 0;
                 return phase === 'assess' && session.phaseCalls.length >= 58
@@ -1202,7 +1223,7 @@ async function runPhaseModel<T>(session: PhaseRuntime<T>) {
             session.output !== undefined ||
             session.rejected >= 3 ||
             session.sdkStop !== null ||
-            session.phaseCalls.length >= (phase === 'assess' ? 60 : 12) ||
+            session.phaseCalls.length >= phaseCallLimit(session) ||
             continuation >= 2
         )
             break;
@@ -1231,7 +1252,7 @@ async function runPhaseModel<T>(session: PhaseRuntime<T>) {
     if (session.sdkStop !== null) throw new BudgetStop(session.sdkStop);
     if (session.output === undefined)
         throw new BudgetStop(
-            session.phaseCalls.length >= (phase === 'assess' ? 60 : 12)
+            session.phaseCalls.length >= phaseCallLimit(session)
                 ? 'model_call_limit'
                 : session.rejected >= 3
                   ? 'phase_corrections_exhausted'
@@ -1255,26 +1276,64 @@ function phaseStopReason<T>(session: PhaseRuntime<T>, failure: unknown) {
     if (failure instanceof BudgetStop) return failure.code;
     if (session.signal.aborted) {
         if (session.run.options.signal?.aborted) return 'cancelled';
-        return session.phase === 'verify' ? 'max_time_ms' : 'max_time_ms';
+        return 'max_time_ms';
     }
     return knownExecutionFailure(failure);
 }
+/** What a failed phase already accepted, so a resumed run continues instead of repeating it. */
+function partialProgress<T>(session: PhaseRuntime<T>) {
+    if (session.phase === 'assess' && session.assessmentAccumulator?.snapshot().length)
+        return {
+            assessments: session.assessmentAccumulator.snapshot(),
+            remaining: session.assessmentAccumulator.remaining(),
+        };
+    if (session.verifications?.size)
+        return {
+            verifications: [...session.verifications.values()].map((entry) => entry.result),
+            remaining: remainingContexts(session),
+        };
+    return null;
+}
+function phaseCallLimit<T>({ phase, run }: PhaseRuntime<T>) {
+    return phase === 'assess' ? 60 : (run.limits.maxVerifyCalls ?? DEFAULT_VERIFY_CALLS);
+}
+function phaseRecordConfiguration<T>(
+    session: PhaseRuntime<T>,
+    model: PhaseRuntime<T>['run']['models'][PhaseRuntime<T>['phase']],
+    partial: boolean,
+) {
+    const { phase, instructions } = session;
+    return {
+        provider: model.provider,
+        model: model.model,
+        effort: model.effort ?? null,
+        ...(partial
+            ? { kind: phase === 'assess' ? 'partial_assessment_progress' : 'partial_verification_progress' }
+            : {}),
+        modelIdentifiers: session.identifiers.snapshot(),
+        promptVersion: 'candidate-observation-v3',
+        maxPhaseCalls: phaseCallLimit(session),
+        maxSourceToolsPerResponse: 50,
+        validationConcurrency: 2,
+        promptHash: digest(instructions),
+        sdkVersion: runtimeVersion('ai'),
+        adapter: '@ai-sdk/openai',
+        adapterVersion: runtimeVersion('@ai-sdk/openai'),
+    };
+}
+/** The phase output, carrying the change summary as assess proposed it or verify accepted it. */
+function phaseOutput<T>(session: PhaseRuntime<T>, partial: ReturnType<typeof partialProgress<T>>) {
+    const summary = session.run.state.changeSummary;
+    if (!summary) return partial ?? session.output ?? null;
+    return {
+        ...(partial ?? { [session.phase === 'assess' ? 'assessments' : 'entries']: session.output ?? [] }),
+        changeSummary: session.phase === 'assess' ? summary.candidate : summary.accepted,
+    };
+}
 async function persistPhaseResult<T>(session: PhaseRuntime<T>, failure: unknown): Promise<T> {
-    const { run, phase, workUnitId, assigned, attempt, startedAt, inputRefs, phaseCalls, signal, instructions } =
-        session;
+    const { run, phase, workUnitId, assigned, attempt, startedAt, inputRefs, phaseCalls, signal } = session;
     const { state, directory, ledger, diagnostics, models, persist } = run;
-    const partial =
-        failure && phase === 'assess' && session.assessmentAccumulator?.snapshot().length
-            ? {
-                  assessments: session.assessmentAccumulator.snapshot(),
-                  remaining: session.assessmentAccumulator.remaining(),
-              }
-            : failure && session.verifications?.size
-              ? {
-                    verifications: [...session.verifications.values()].map((entry) => entry.result),
-                    remaining: remainingContexts(session),
-                }
-              : null;
+    const partial = failure ? partialProgress(session) : null;
     if (failure && phase === 'verify' && state.changeSummary) {
         state.changeSummary.accepted = null;
         state.changeSummary.status = 'pending';
@@ -1294,31 +1353,9 @@ async function persistPhaseResult<T>(session: PhaseRuntime<T>, failure: unknown)
         evidenceRefs: Object.keys(ledger.records),
         limitations: [],
         stopReason: phaseStopReason(session, failure),
-        configuration: {
-            provider: models[phase].provider,
-            model: models[phase].model,
-            effort: models[phase].effort ?? null,
-            ...(partial
-                ? { kind: phase === 'assess' ? 'partial_assessment_progress' : 'partial_verification_progress' }
-                : {}),
-            modelIdentifiers: session.identifiers.snapshot(),
-            promptVersion: 'candidate-observation-v3',
-            maxPhaseCalls: phase === 'assess' ? 60 : 12,
-            maxSourceToolsPerResponse: 50,
-            validationConcurrency: 2,
-            promptHash: digest(instructions),
-            sdkVersion: runtimeVersion('ai'),
-            adapter: '@ai-sdk/openai',
-            adapterVersion: runtimeVersion('@ai-sdk/openai'),
-        },
+        configuration: phaseRecordConfiguration(session, models[phase], partial !== null),
         usageRefs: phaseCalls.map((c) => `call:${c}`),
-        output: run.state.changeSummary
-            ? {
-                  ...(partial ?? { [phase === 'assess' ? 'assessments' : 'entries']: session.output ?? [] }),
-                  changeSummary:
-                      phase === 'assess' ? run.state.changeSummary.candidate : run.state.changeSummary.accepted,
-              }
-            : (partial ?? session.output ?? null),
+        output: phaseOutput(session, partial),
     });
     const filename = phaseFilename(phase, workUnitId, attempt);
     await atomicJson(join(directory, 'phases', filename), sanitizeRecord(record));
@@ -1369,6 +1406,11 @@ async function recoverSummaryOnlyFailure<T>(session: PhaseRuntime<T>, error: unk
     });
     return true;
 }
+/** A budget stop keeps its own code; an aborted phase hit its deadline or was cancelled; anything else failed in the provider or execution. */
+function phaseFailureCode<T>(session: PhaseRuntime<T>, error: unknown): string {
+    if (error instanceof BudgetStop) return error.code;
+    return session.signal.aborted ? 'phase_deadline_or_cancelled' : 'provider_or_execution_failed';
+}
 async function invokePhase<T>(
     run: AssessmentRuntime,
     phase: 'assess' | 'verify',
@@ -1392,12 +1434,7 @@ async function invokePhase<T>(
                 phase,
                 workUnitId,
                 attempt,
-                code:
-                    error instanceof BudgetStop
-                        ? error.code
-                        : session.signal.aborted
-                          ? 'phase_deadline_or_cancelled'
-                          : 'provider_or_execution_failed',
+                code: phaseFailureCode(session, error),
                 details: { ...providerFailureDiagnostics(error), ...systemFailureDiagnostics(error) },
             });
         }
@@ -1468,6 +1505,15 @@ async function prepareRunEvidence(run: AssessmentRuntime) {
     run.modelDiff = await modelDiffEvidence(directory, run.preparedManifest.files?.['diff.patch'], prepared.state.diff);
     await atomicJson(join(directory, 'prepared.json'), sanitizeRecord(prepared.state));
     if (prContext) await atomicJson(join(directory, 'pr-context.json'), sanitizeRecord(prContext));
+    assertPinnedMaterial(state, material);
+    for (const publication of Object.values(material)) ledger.publication(publication);
+    run.evidencePack = prepareEvidencePack({ state: prepared.state, publications: material, ledger });
+    await writeEvidencePack(directory, run.evidencePack);
+    run.repositoryInstructions = await repositoryInstructionsWithinBudget(run);
+    await run.persist();
+}
+/** Each assessed entry's pinned publication is still the exact version and content it was prepared with. */
+function assertPinnedMaterial(state: AssessmentState, material: AssessmentRuntime['material']) {
     for (const entry of state.entries) {
         if (!entry.material) continue;
         const pinned = publicationSchema.parse(material[entry.assessmentId]);
@@ -1479,25 +1525,23 @@ async function prepareRunEvidence(run: AssessmentRuntime) {
         )
             throw new Error('pinned_material_changed');
     }
-    for (const publication of Object.values(material)) ledger.publication(publication);
-    run.evidencePack = prepareEvidencePack({ state: prepared.state, publications: material, ledger });
-    await writeEvidencePack(directory, run.evidencePack);
+}
+/** Repository instruction files count against the assess time budget; running out is a budget stop. */
+async function repositoryInstructionsWithinBudget(run: AssessmentRuntime) {
     const remaining = run.budget.remainingMs('assess');
     if (remaining !== null && remaining <= 0) throw new BudgetStop('max_time_ms');
     const deadline = remaining === null ? undefined : AbortSignal.timeout(Math.ceil(remaining));
     const signals = [run.options.signal, deadline].filter((value): value is AbortSignal => value !== undefined);
     try {
-        run.repositoryInstructions = await repositoryInstructionsEvidence(
+        return await repositoryInstructionsEvidence(
             run.source,
-            ledger,
+            run.ledger,
             signals.length ? AbortSignal.any(signals) : undefined,
         );
     } catch (error) {
         if (deadline?.aborted) throw new BudgetStop('max_time_ms');
         throw error;
     }
-
-    await run.persist();
 }
 async function restorePartialProposals(run: AssessmentRuntime) {
     if (!run.options.resume) return;

@@ -21,6 +21,7 @@ export {
 export { runAssessment, DEFAULT_EXECUTION_LIMITS, type ExecutionLimits, type AssessmentState } from './assess.js';
 export { loadAssessmentCheckpoint, type AssessmentCheckpoint } from './resume.js';
 export { assessmentModel, type ProviderConfiguration, type AssessmentProvider } from './providers.js';
+export { PROVIDER_SPEEDS, type ProviderSpeed } from './speed.js';
 export { decideExit, DEFAULT_POLICY, type AssessmentPolicy, type AcceptedResult } from './results.js';
 
 export {

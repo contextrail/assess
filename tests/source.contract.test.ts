@@ -217,63 +217,51 @@ describe('passive fixed-snapshot source operations', () => {
         expect(binary).toMatchObject({ status: 'complete', items: [], scannedFiles: 1 });
         expect(binary.skipped[0]).toMatchObject({ reason: 'binary_nul', entry: { path: 'binary.dat' } });
     });
-    it.skipIf(process.env.CONTEXTRAIL_CHECK_MODE === 'quick')(
-        'discovers decisive unchanged supporting code and reconciles larger continuations through exported operations',
-        async () => {
-            const evidence = await demonstrateSource(api);
-            expect(evidence).toMatchObject({
-                listedPaths: 79,
-                literalMatches: 1167,
-                changes: 69,
-                laterChangesIsolated: true,
-                passiveHelperMarkerAbsent: true,
-            });
-            expect(evidence.unchangedSupportingCode.read.entry.object).toMatch(/^[a-f0-9]{40}$/u);
-            expect(evidence.readPages).toBeGreaterThan(20);
-        },
-        120_000,
-    );
-    it.skipIf(process.env.CONTEXTRAIL_CHECK_MODE === 'quick')(
-        'identifies both sides, additions/deletions/renames and exact blob provenance',
-        async () => {
-            const f = fixture();
-            const artifact = api.fixGitIdentity(f.root, f.base, f.head);
-            const source = new api.FixedSnapshotSource(artifact);
-            const diff = await source.changes();
-            expect(diff.status).toBe('complete');
-            expect(diff.items.map((item) => item.kind).sort()).toEqual([
-                'addition',
-                'deletion',
-                'modification',
-                'rename',
-            ]);
-            const rename = diff.items.find((item) => item.kind === 'rename')!;
-            expect(rename.base?.path).toBe('old name.ts');
-            expect(rename.head?.path).toBe('new name.ts');
-            expect(rename.base?.object).toBe(rename.head?.object);
-            expect(rename.base).toMatchObject({ side: 'base', commit: f.base, tree: artifact.base.tree });
-            expect(rename.head).toMatchObject({ side: 'head', commit: f.head, tree: artifact.head.tree });
-            const noRename = await source.changes({ detectRenames: false });
-            expect(noRename.items.map((item) => item.kind).sort()).toEqual([
-                'addition',
-                'addition',
-                'deletion',
-                'deletion',
-                'modification',
-            ]);
-            for (const side of ['base', 'head'] as const) {
-                const read = await source.read({ side, path: 'caller.ts', start: { line: 2, column: 0 }, endLine: 2 });
-                const expected = (side === 'base' ? f.before : f.after).get('caller.ts') as string;
-                expect(content(read)).toBe(expected.split('\n')[1] + '\n');
-                expect(read.fragments[0]).toMatchObject({ line: 2, column: 0 });
-                expect(
-                    execFileSync('git', ['-C', f.root, 'cat-file', 'blob', read.entry!.object], { encoding: 'utf8' }),
-                ).toBe(expected);
-            }
-            expect((await source.read({ side: 'base', path: 'deleted.ts' })).status).toBe('complete');
-            expect((await source.read({ side: 'head', path: 'deleted.ts' })).reason).toBe('missing_path');
-        },
-    );
+    it('discovers decisive unchanged supporting code and reconciles larger continuations through exported operations', async () => {
+        const evidence = await demonstrateSource(api);
+        expect(evidence).toMatchObject({
+            listedPaths: 79,
+            literalMatches: 1167,
+            changes: 69,
+            laterChangesIsolated: true,
+            passiveHelperMarkerAbsent: true,
+        });
+        expect(evidence.unchangedSupportingCode.read.entry.object).toMatch(/^[a-f0-9]{40}$/u);
+        expect(evidence.readPages).toBeGreaterThan(20);
+    }, 120_000);
+    it('identifies both sides, additions/deletions/renames and exact blob provenance', async () => {
+        const f = fixture();
+        const artifact = api.fixGitIdentity(f.root, f.base, f.head);
+        const source = new api.FixedSnapshotSource(artifact);
+        const diff = await source.changes();
+        expect(diff.status).toBe('complete');
+        expect(diff.items.map((item) => item.kind).sort()).toEqual(['addition', 'deletion', 'modification', 'rename']);
+        const rename = diff.items.find((item) => item.kind === 'rename')!;
+        expect(rename.base?.path).toBe('old name.ts');
+        expect(rename.head?.path).toBe('new name.ts');
+        expect(rename.base?.object).toBe(rename.head?.object);
+        expect(rename.base).toMatchObject({ side: 'base', commit: f.base, tree: artifact.base.tree });
+        expect(rename.head).toMatchObject({ side: 'head', commit: f.head, tree: artifact.head.tree });
+        const noRename = await source.changes({ detectRenames: false });
+        expect(noRename.items.map((item) => item.kind).sort()).toEqual([
+            'addition',
+            'addition',
+            'deletion',
+            'deletion',
+            'modification',
+        ]);
+        for (const side of ['base', 'head'] as const) {
+            const read = await source.read({ side, path: 'caller.ts', start: { line: 2, column: 0 }, endLine: 2 });
+            const expected = (side === 'base' ? f.before : f.after).get('caller.ts') as string;
+            expect(content(read)).toBe(expected.split('\n')[1] + '\n');
+            expect(read.fragments[0]).toMatchObject({ line: 2, column: 0 });
+            expect(
+                execFileSync('git', ['-C', f.root, 'cat-file', 'blob', read.entry!.object], { encoding: 'utf8' }),
+            ).toBe(expected);
+        }
+        expect((await source.read({ side: 'base', path: 'deleted.ts' })).status).toBe('complete');
+        expect((await source.read({ side: 'head', path: 'deleted.ts' })).reason).toBe('missing_path');
+    });
     it('confines paths, treats links as data, represents unsupported material and preserves unusual valid paths', async () => {
         const f = fixture();
         const source = new api.FixedSnapshotSource(api.fixGitIdentity(f.root, f.base, f.head));
@@ -301,92 +289,82 @@ describe('passive fixed-snapshot source operations', () => {
         );
         expect(existsSync(join(f.root, 'EXECUTED'))).toBe(false);
     });
-    it.skipIf(process.env.CONTEXTRAIL_CHECK_MODE === 'quick')(
-        'continues UTF-8 source fragments, preserves CRLF/BOM and validates range boundaries',
-        async () => {
-            const f = fixture();
-            const artifact = api.fixGitIdentity(f.root, f.base, f.head);
-            const source = new api.FixedSnapshotSource(artifact, { readBytes: 4, readLines: 1 });
-            let request: api.ReadRequest | null = { side: 'head', path: '-leading dash.txt' };
-            let text = '';
-            let pages = 0;
-            while (request) {
-                const page = await source.read(request);
-                text += content(page);
-                request = page.next;
-                pages++;
-            }
-            expect(text).toBe(f.after.get('-leading dash.txt'));
-            expect(pages).toBeGreaterThan(3);
-            for (const start of [
-                { line: 0, column: 0 },
-                { line: 1, column: -1 },
-                { line: 3, column: 1 },
-                { line: 2, column: 1 },
-                { line: 1, column: 100 },
-            ])
-                await expect(source.read({ side: 'head', path: '-leading dash.txt', start })).rejects.toMatchObject({
-                    code: 'invalid_input',
-                });
-            await expect(
-                source.read({ side: 'head', path: 'caller.ts', start: { line: 2, column: 0 }, endLine: 1 }),
-            ).rejects.toMatchObject({ code: 'invalid_input' });
-            expect(content(await source.read({ side: 'head', path: 'empty.txt' }))).toBe('');
-            expect(api.DEFAULT_SOURCE_LIMITS.readBytes).toBe(65536);
-            expect(() => new api.FixedSnapshotSource(artifact, { readBytes: 3 })).toThrow();
-        },
-    );
-    it.skipIf(process.env.CONTEXTRAIL_CHECK_MODE === 'quick')(
-        'returns overlapping literal navigation locations, explicit empty partial pages and bound cursors',
-        async () => {
-            const f = fixture();
-            f.write('overlap.txt', 'aaaa\n');
-            f.git('-c', 'core.fsmonitor=false', 'add', 'overlap.txt');
-            f.git('commit', '-qm', 'overlap');
-            const source = new api.FixedSnapshotSource(api.fixGitIdentity(f.root, f.base, 'HEAD'), {
-                searchMatches: 1,
-                searchFiles: 1,
+    it('continues UTF-8 source fragments, preserves CRLF/BOM and validates range boundaries', async () => {
+        const f = fixture();
+        const artifact = api.fixGitIdentity(f.root, f.base, f.head);
+        const source = new api.FixedSnapshotSource(artifact, { readBytes: 4, readLines: 1 });
+        let request: api.ReadRequest | null = { side: 'head', path: '-leading dash.txt' };
+        let text = '';
+        let pages = 0;
+        while (request) {
+            const page = await source.read(request);
+            text += content(page);
+            request = page.next;
+            pages++;
+        }
+        expect(text).toBe(f.after.get('-leading dash.txt'));
+        expect(pages).toBeGreaterThan(3);
+        for (const start of [
+            { line: 0, column: 0 },
+            { line: 1, column: -1 },
+            { line: 3, column: 1 },
+            { line: 2, column: 1 },
+            { line: 1, column: 100 },
+        ])
+            await expect(source.read({ side: 'head', path: '-leading dash.txt', start })).rejects.toMatchObject({
+                code: 'invalid_input',
             });
-            const keys: number[] = [];
-            let cursor: api.SearchCursor | null = null;
-            do {
-                const page = await source.search({
-                    side: 'head',
-                    literal: 'aa',
-                    path: 'overlap.txt',
-                    ...(cursor ? { cursor } : {}),
-                });
-                keys.push(...page.items.map((match) => match.column));
-                cursor = page.next;
-            } while (cursor);
-            expect(keys).toEqual([0, 1, 2]);
-            const first = await source.search({ side: 'head', literal: 'absent' });
-            expect(first.status).toBe('truncated');
-            expect(first.items).toEqual([]);
-            await expect(source.search({ side: 'base', literal: 'absent', cursor: first.next! })).rejects.toMatchObject(
-                {
-                    code: 'invalid_cursor',
-                },
-            );
-            await expect(
-                source.search({ side: 'head', literal: 'different', cursor: first.next! }),
-            ).rejects.toMatchObject({
-                code: 'invalid_cursor',
-            });
-            for (const literal of ['', 'a\nb', '\0'])
-                await expect(source.search({ side: 'head', literal })).rejects.toMatchObject({ code: 'invalid_input' });
-            const literal = await new api.FixedSnapshotSource(api.fixGitIdentity(f.root, f.base, 'HEAD')).search({
+        await expect(
+            source.read({ side: 'head', path: 'caller.ts', start: { line: 2, column: 0 }, endLine: 1 }),
+        ).rejects.toMatchObject({ code: 'invalid_input' });
+        expect(content(await source.read({ side: 'head', path: 'empty.txt' }))).toBe('');
+        expect(api.DEFAULT_SOURCE_LIMITS.readBytes).toBe(65536);
+        expect(() => new api.FixedSnapshotSource(artifact, { readBytes: 3 })).toThrow();
+    });
+    it('returns overlapping literal navigation locations, explicit empty partial pages and bound cursors', async () => {
+        const f = fixture();
+        f.write('overlap.txt', 'aaaa\n');
+        f.git('-c', 'core.fsmonitor=false', 'add', 'overlap.txt');
+        f.git('commit', '-qm', 'overlap');
+        const source = new api.FixedSnapshotSource(api.fixGitIdentity(f.root, f.base, 'HEAD'), {
+            searchMatches: 1,
+            searchFiles: 1,
+        });
+        const keys: number[] = [];
+        let cursor: api.SearchCursor | null = null;
+        do {
+            const page = await source.search({
                 side: 'head',
-                literal: '[a.*]',
+                literal: 'aa',
+                path: 'overlap.txt',
+                ...(cursor ? { cursor } : {}),
             });
-            expect(literal.items).toHaveLength(1);
-            expect(literal.evidence).toBe('literal_navigation_only');
-            await expect(source.list({ side: 'head', offset: 10000 })).rejects.toMatchObject({
-                code: 'invalid_cursor',
-            });
-            await expect(source.changes({ offset: -1 })).rejects.toMatchObject({ code: 'invalid_input' });
-        },
-    );
+            keys.push(...page.items.map((match) => match.column));
+            cursor = page.next;
+        } while (cursor);
+        expect(keys).toEqual([0, 1, 2]);
+        const first = await source.search({ side: 'head', literal: 'absent' });
+        expect(first.status).toBe('truncated');
+        expect(first.items).toEqual([]);
+        await expect(source.search({ side: 'base', literal: 'absent', cursor: first.next! })).rejects.toMatchObject({
+            code: 'invalid_cursor',
+        });
+        await expect(source.search({ side: 'head', literal: 'different', cursor: first.next! })).rejects.toMatchObject({
+            code: 'invalid_cursor',
+        });
+        for (const literal of ['', 'a\nb', '\0'])
+            await expect(source.search({ side: 'head', literal })).rejects.toMatchObject({ code: 'invalid_input' });
+        const literal = await new api.FixedSnapshotSource(api.fixGitIdentity(f.root, f.base, 'HEAD')).search({
+            side: 'head',
+            literal: '[a.*]',
+        });
+        expect(literal.items).toHaveLength(1);
+        expect(literal.evidence).toBe('literal_navigation_only');
+        await expect(source.list({ side: 'head', offset: 10000 })).rejects.toMatchObject({
+            code: 'invalid_cursor',
+        });
+        await expect(source.changes({ offset: -1 })).rejects.toMatchObject({ code: 'invalid_input' });
+    });
     it('distinguishes cancellation, timeout, unavailable Git objects and response boundaries', async () => {
         const f = fixture();
         const artifact = api.fixGitIdentity(f.root, f.base, f.head);

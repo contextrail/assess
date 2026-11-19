@@ -35,6 +35,10 @@ inputs:
     description: 'CLI effort; empty uses provider default.'
     required: false
     default: ''
+  speed:
+    description: 'Provider service tier: normal, fast (priority) or ultrafast. A tier the model does not serve is reported and the run continues.'
+    required: false
+    default: 'normal'
   phase-models:
     description: 'JSON overrides for assess/verify provider/model and optional effort.'
     required: false
@@ -46,6 +50,10 @@ inputs:
   max-time-ms:
     description: 'Positive model-session time limit in milliseconds.'
     required: true
+  max-verify-calls:
+    description: 'Model calls per verification; empty uses the package default (12). Raise it for large changes.'
+    required: false
+    default: ''
   feedback:
     description: 'CLI feedback: send or off.'
     required: false
@@ -129,12 +137,14 @@ runs:
         PROVIDER: ${{ inputs.provider }}
         MODEL: ${{ inputs.model }}
         EFFORT: ${{ inputs.effort }}
+        SPEED: ${{ inputs.speed }}
         ENFORCEMENT: ${{ inputs.enforcement }}
         PHASE_MODELS: ${{ inputs.phase-models }}
         LOG_LEVEL: ${{ inputs.log-level }}
         INLINE_COMMENTS: ${{ inputs.inline-comments }}
         POST_COMMENT: ${{ inputs.post-comment }}
         MAX_TIME_MS: ${{ inputs.max-time-ms }}
+        MAX_VERIFY_CALLS: ${{ inputs.max-verify-calls }}
         FEEDBACK: ${{ inputs.feedback }}
         REPOSITORY_ATTRIBUTION: ${{ inputs.repository-attribution }}
         ARTIFACT_RETENTION_DAYS: ${{ inputs.artifact-retention-days }}

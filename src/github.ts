@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import { digest, preparationManifest, type GitIdentity } from './prepare.js';
 import { validatePhaseRecord } from './phases.js';
+import { gitExecutable } from './git.js';
 import { phaseItems } from './change-summary.js';
 import { revalidateCandidate, validateConcern, projectCandidates, type ConcernDecision } from './candidate.js';
 import { EvidenceLedger, type Evidence, type Citation } from './evidence.js';
@@ -100,7 +101,7 @@ function git(repo: string | null, args: string[], token?: string): string {
             : {}),
     };
     const out = spawnSync(
-        'git',
+        gitExecutable(),
         [
             '--no-pager',
             '-c',
@@ -526,18 +527,7 @@ export async function prepareGitHubAssessment(options: {
 }) {
     const request = githubRequester(options.repository, options.token ?? process.env.GITHUB_TOKEN ?? '', options.fetch);
     const pr = object(await request(`/pulls/${options.prNumber}`));
-    const c = githubInputSchema.parse({
-        version: 1,
-        repository: options.repository,
-        pr: options.prNumber,
-        reviewer: options.reviewer,
-        base: options.fixed?.base ?? string(object(pr.base).sha),
-        head: options.fixed?.head ?? string(object(pr.head).sha),
-        baseBranch: options.baseBranch ?? '',
-        ...(process.env.GITHUB_RUN_ID
-            ? { githubRun: process.env.GITHUB_RUN_ID, githubAttempt: Number(process.env.GITHUB_RUN_ATTEMPT ?? 1) }
-            : {}),
-    });
+    const c = comparisonInput(options, pr);
     if (!sameComparison(pr, c)) fail('ineligible_pr');
     const { root, repository } = createComparisonCheckout(
         options.outputDir,
@@ -576,6 +566,21 @@ export async function prepareGitHubAssessment(options: {
         head: c.head,
         prContextPath: join(root, 'pr-context.json'),
     };
+}
+/** The PR's current base and head unless fixed commits were supplied, plus the Actions run identity. */
+function comparisonInput(options: Parameters<typeof prepareGitHubAssessment>[0], pr: Record<string, unknown>) {
+    return githubInputSchema.parse({
+        version: 1,
+        repository: options.repository,
+        pr: options.prNumber,
+        reviewer: options.reviewer,
+        base: options.fixed?.base ?? string(object(pr.base).sha),
+        head: options.fixed?.head ?? string(object(pr.head).sha),
+        baseBranch: options.baseBranch ?? '',
+        ...(process.env.GITHUB_RUN_ID
+            ? { githubRun: process.env.GITHUB_RUN_ID, githubAttempt: Number(process.env.GITHUB_RUN_ATTEMPT ?? 1) }
+            : {}),
+    });
 }
 type DiffAnchors = Map<string, Set<number>>;
 export function parseDiffAnchors(diff: string): DiffAnchors {
@@ -1218,6 +1223,34 @@ function verifyCandidateJudgments(
     files: Record<string, unknown>,
 ) {
     if (!files['evidence.json']) fail('publication_evidence_unbound');
+    const ledger = verifiedLedger(runDir, state);
+    if (!Array.isArray(state.observations)) {
+        verifyIncompleteAssessment(state, ledger);
+        return;
+    }
+    const entries = structuredClone(objects(state.entries)) as unknown as AssessmentEntry[];
+    const proposals = [...handoffs.proposals.values()].map((proposal) =>
+        revalidateCandidate(proposal as unknown as AssessmentProposal, entries, ledger),
+    );
+    const observations = proposals.flatMap((proposal) => proposal.observations ?? []);
+    if (digest(observations) !== digest(state.observations)) fail('publication_observations_changed');
+    const decisions = verifiedDecisions(handoffs, observations, ledger);
+    if (digest(orderedDecisions(decisions)) !== digest(orderedDecisions(state.concernDecisions)))
+        fail('publication_concern_decisions_changed');
+    verifyProjection(state, entries, proposals, decisions);
+    const expected = observations.filter((row) => row.concern).length;
+    const counters = object(state.concernValidation);
+    if (
+        counters.expected !== expected ||
+        counters.validated !== decisions.length ||
+        counters.complete !== (expected === decisions.length)
+    )
+        fail('publication_coverage_unverified');
+    verifyChangeSummary(state, handoffs);
+}
+
+/** Every retained evidence record re-adds to the same ref, and source evidence names the artifact's commit. */
+function verifiedLedger(runDir: string, state: Record<string, unknown>): EvidenceLedger {
     const ledger = new EvidenceLedger();
     for (const [ref, raw] of Object.entries(object(json(join(runDir, 'evidence.json'))))) {
         const record = raw as Evidence;
@@ -1233,34 +1266,38 @@ function verifyCandidateJudgments(
         )
             fail('publication_source_identity_changed');
     }
-    if (!Array.isArray(state.observations)) {
-        const counts = object(state.concernValidation);
-        if (
-            objects(state.entries).some((entry) => object(entry.result).disposition !== 'not_evaluated') ||
-            objects(state.findings).length ||
-            objects(state.followUps).length ||
-            objects(state.concernDecisions).length ||
-            counts.expected !== 0 ||
-            counts.validated !== 0 ||
-            counts.complete !== false
-        )
-            fail('publication_incomplete_assessment_changed');
-        for (const phase of objects(state.phases).filter((phase) => phase.phase === 'assess')) {
-            for (const proposal of objects(object(phase.output).assessments))
-                revalidateCandidate(
-                    proposal as unknown as AssessmentProposal,
-                    objects(state.entries) as unknown as AssessmentEntry[],
-                    ledger,
-                );
-        }
-        return;
+    return ledger;
+}
+
+/** Without observations nothing may be evaluated or found, yet every retained candidate must still revalidate. */
+function verifyIncompleteAssessment(state: Record<string, unknown>, ledger: EvidenceLedger): void {
+    const counts = object(state.concernValidation);
+    if (
+        objects(state.entries).some((entry) => object(entry.result).disposition !== 'not_evaluated') ||
+        objects(state.findings).length ||
+        objects(state.followUps).length ||
+        objects(state.concernDecisions).length ||
+        counts.expected !== 0 ||
+        counts.validated !== 0 ||
+        counts.complete !== false
+    )
+        fail('publication_incomplete_assessment_changed');
+    for (const phase of objects(state.phases).filter((phase) => phase.phase === 'assess')) {
+        for (const proposal of objects(object(phase.output).assessments))
+            revalidateCandidate(
+                proposal as unknown as AssessmentProposal,
+                objects(state.entries) as unknown as AssessmentEntry[],
+                ledger,
+            );
     }
-    const entries = structuredClone(objects(state.entries)) as unknown as AssessmentEntry[];
-    const proposals = [...handoffs.proposals.values()].map((proposal) =>
-        revalidateCandidate(proposal as unknown as AssessmentProposal, entries, ledger),
-    );
-    const observations = proposals.flatMap((proposal) => proposal.observations ?? []);
-    if (digest(observations) !== digest(state.observations)) fail('publication_observations_changed');
+}
+
+/** Re-derive each completed concern decision from its own current, correctly bound verification record. */
+function verifiedDecisions(
+    handoffs: PublicationHandoffs,
+    observations: NonNullable<AssessmentProposal['observations']>,
+    ledger: EvidenceLedger,
+): ConcernDecision[] {
     const clean = ({ ref, quote, start, end }: Citation) => ({ ref, quote, start, end });
     const decisions: ConcernDecision[] = [];
     for (const observation of observations.filter((row) => row.concern)) {
@@ -1284,13 +1321,22 @@ function verifyCandidateJudgments(
         if (digest(decision) !== digest(output)) fail('publication_concern_changed');
         decisions.push(decision);
     }
-    const orderedDecisions = (values: unknown) => {
-        const rows = objects(values);
-        if (!Array.isArray(values) || rows.length !== values.length) fail('publication_concern_decisions_changed');
-        return rows.sort((a, b) => string(a.observationId).localeCompare(string(b.observationId)));
-    };
-    if (digest(orderedDecisions(decisions)) !== digest(orderedDecisions(state.concernDecisions)))
-        fail('publication_concern_decisions_changed');
+    return decisions;
+}
+
+function orderedDecisions(values: unknown) {
+    const rows = objects(values);
+    if (!Array.isArray(values) || rows.length !== values.length) fail('publication_concern_decisions_changed');
+    return rows.sort((a, b) => string(a.observationId).localeCompare(string(b.observationId)));
+}
+
+/** Re-projecting the verified decisions must reproduce the retained findings, follow-ups and results. */
+function verifyProjection(
+    state: Record<string, unknown>,
+    entries: AssessmentEntry[],
+    proposals: AssessmentProposal[],
+    decisions: ConcernDecision[],
+): void {
     const projected = { entries, checks: [], findings: [], followUps: [] } as Parameters<typeof projectCandidates>[0];
     projectCandidates(projected, proposals, decisions);
     if (digest(projected.findings) !== digest(state.findings)) fail('publication_finding_unverified');
@@ -1304,21 +1350,15 @@ function verifyCandidateJudgments(
         )
             fail('publication_resolution_changed');
     }
-    const expected = observations.filter((row) => row.concern).length;
-    const counters = object(state.concernValidation);
-    if (
-        counters.expected !== expected ||
-        counters.validated !== decisions.length ||
-        counters.complete !== (expected === decisions.length)
-    )
-        fail('publication_coverage_unverified');
+}
+
+function verifyChangeSummary(state: Record<string, unknown>, handoffs: PublicationHandoffs): void {
     const summary = object(state.changeSummary);
-    if (summary.status === 'verified') {
-        const record = handoffs.concernRecords.get('change-summary');
-        const output = object(object(record?.output).entries ?? record?.output);
-        if (record?.status !== 'complete' || !output.summary || digest(output.summary) !== digest(summary.accepted))
-            fail('publication_summary_unverified');
-    }
+    if (summary.status !== 'verified') return;
+    const record = handoffs.concernRecords.get('change-summary');
+    const output = object(object(record?.output).entries ?? record?.output);
+    if (record?.status !== 'complete' || !output.summary || digest(output.summary) !== digest(summary.accepted))
+        fail('publication_summary_unverified');
 }
 /** Validate caller-controlled retained records before using their judgments for a privileged write.
  * Hashes detect changed material; they do not authenticate a caller able to replace the whole bundle. */

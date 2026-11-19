@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const selectionsSchema = z.strictObject({
+const selectionsSchema = z.strictObject({
     contextIds: z.array(z.string().startsWith('context://').max(500)).optional(),
     domains: z.array(z.strictObject({ domainId: z.string().min(1), includeDescendants: z.boolean() })).optional(),
 });
@@ -31,7 +31,7 @@ export const publicationSchema = z
     })
     .passthrough();
 export type Publication = z.infer<typeof publicationSchema>;
-export const scopeEntrySchema = z.strictObject({
+const scopeEntrySchema = z.strictObject({
     nodeId: z.string().startsWith('context://'),
     version: z.number().int().positive().nullable(),
     subtype: z.enum(['standard', 'guidance']).nullable(),

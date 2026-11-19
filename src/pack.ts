@@ -434,6 +434,11 @@ function splitsSurrogate(text: string, offset: number) {
         text.charCodeAt(offset - 1) <= 0xdbff
     );
 }
+function utf8ByteLength(codePoint: number): number {
+    if (codePoint <= 0x7f) return 1;
+    if (codePoint <= 0x7ff) return 2;
+    return codePoint <= 0xffff ? 3 : 4;
+}
 function boundedEnd(text: string, start: number, maxBytes: number, maxSegments: number) {
     let end = start,
         bytes = 0,
@@ -441,7 +446,7 @@ function boundedEnd(text: string, start: number, maxBytes: number, maxSegments: 
     while (end < text.length && segments < maxSegments) {
         const point = text.codePointAt(end)!,
             crlf = point === 13 && text.charCodeAt(end + 1) === 10,
-            size = crlf ? 2 : point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+            size = crlf ? 2 : utf8ByteLength(point);
         if (bytes + size > maxBytes) break;
         bytes += size;
         end += crlf || point > 0xffff ? 2 : 1;

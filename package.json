@@ -1,6 +1,6 @@
 {
     "name": "@contextrail/assess",
-    "version": "1.0.0-alpha.3",
+    "version": "1.0.0-alpha.4",
     "description": "Assess proposed Git changes against published organizational standards, with per-standard outcomes and retained evidence.",
     "type": "module",
     "main": "dist/index.js",

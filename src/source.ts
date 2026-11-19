@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { MAX_PREPARATION_BYTES, passiveGitEnvironment, sensitiveGitPath } from './git.js';
+import { gitExecutable, MAX_PREPARATION_BYTES, passiveGitEnvironment, sensitiveGitPath } from './git.js';
 import type { GitIdentity } from './prepare.js';
 
 export type SourceSide = 'base' | 'head';
@@ -107,6 +107,32 @@ function safePath(path: string) {
             'path must be an exact repository-relative Git path without dot segments.',
         );
 }
+const CHANGE_KINDS = { A: 'addition', D: 'deletion', M: 'modification', R: 'rename', T: 'type_change' } as const;
+
+/**
+ * One `diff-tree --raw` change from its `:baseMode headMode baseObject headObject status` header and
+ * path; a rename also has its original path. A side whose mode is all zeros does not exist.
+ */
+function sourceChange(
+    header: string,
+    path: string,
+    originalPath: string | undefined,
+    offset: number,
+    base: Snapshot,
+    head: Snapshot,
+): SourceChange {
+    const [baseMode, headMode, baseObject, headObject, status] = header.slice(1).split(' ');
+    const side = (snapshot: Snapshot, mode: string, object: string, sidePath: string) =>
+        mode === '000000' ? null : { ...snapshot, mode, object, path: sidePath, kind: kind(mode) };
+    return {
+        offset,
+        kind: CHANGE_KINDS[status![0] as keyof typeof CHANGE_KINDS],
+        base: side(base, baseMode!, baseObject!, originalPath ?? path),
+        head: side(head, headMode!, headObject!, path),
+        similarity: status!.startsWith('R') ? Number(status!.slice(1)) : null,
+    };
+}
+
 function kind(mode: string): SourceEntry['kind'] {
     return mode === '160000' ? 'submodule' : mode === '120000' ? 'symlink' : 'file';
 }
@@ -274,7 +300,7 @@ export class FixedSnapshotSource {
     private async *git(args: string[], operation: Operation): AsyncGenerator<Buffer> {
         operation.check();
         const child = spawn(
-            'git',
+            gitExecutable(),
             [
                 '--no-pager',
                 '--no-lazy-fetch',
@@ -421,8 +447,8 @@ export class FixedSnapshotSource {
                     header = record;
                     continue;
                 }
-                const [baseMode, headMode, baseObject, headObject, status] = header.slice(1).split(' ');
-                if (status!.startsWith('R') && firstPath === undefined) {
+                const status = header.slice(1).split(' ')[4]!;
+                if (status.startsWith('R') && firstPath === undefined) {
                     firstPath = record;
                     continue;
                 }
@@ -436,17 +462,7 @@ export class FixedSnapshotSource {
                             items,
                             next: { offset: offset + items.length, detectRenames },
                         };
-                    const source = (snapshot: Snapshot, mode: string, object: string, path: string) =>
-                        mode === '000000' ? null : { ...snapshot, mode, object, path, kind: kind(mode) };
-                    items.push({
-                        offset: index - 1,
-                        kind: (
-                            { A: 'addition', D: 'deletion', M: 'modification', R: 'rename', T: 'type_change' } as const
-                        )[status![0] as 'A' | 'D' | 'M' | 'R' | 'T'],
-                        base: source(base, baseMode!, baseObject!, firstPath ?? record),
-                        head: source(head, headMode!, headObject!, record),
-                        similarity: status!.startsWith('R') ? Number(status!.slice(1)) : null,
-                    });
+                    items.push(sourceChange(header, record, firstPath, index - 1, base, head));
                 }
                 header = undefined;
                 firstPath = undefined;

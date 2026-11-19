@@ -104,20 +104,9 @@ export class ModelIdentifiers {
     private translate(value: unknown, outward: boolean, field = ''): unknown {
         if (Array.isArray(value)) return value.map((item) => this.translate(item, outward, field));
         if (value && typeof value === 'object') {
-            const citation =
-                outward &&
-                'ref' in value &&
-                typeof value.ref === 'string' &&
-                Object.hasOwn(this.evidence, value.ref) &&
-                'quote' in value &&
-                typeof value.quote === 'string';
-            const result =
-                outward &&
-                'assessmentId' in value &&
-                typeof value.assessmentId === 'string' &&
-                this.handles.has(value.assessmentId) &&
-                'disposition' in value &&
-                'adherence' in value;
+            // Outward, a citation loses its quoted span and a result its revision lineage.
+            const citation = outward && this.isCitation(value);
+            const result = outward && this.isResult(value);
             return Object.fromEntries(
                 Object.entries(value)
                     .filter(
@@ -129,6 +118,31 @@ export class ModelIdentifiers {
             );
         }
         if (typeof value !== 'string' || !MODEL_IDENTIFIER_FIELDS.has(field)) return value;
+        return this.translateIdentifier(value, outward);
+    }
+
+    private isCitation(value: object): boolean {
+        return (
+            'ref' in value &&
+            typeof value.ref === 'string' &&
+            Object.hasOwn(this.evidence, value.ref) &&
+            'quote' in value &&
+            typeof value.quote === 'string'
+        );
+    }
+
+    private isResult(value: object): boolean {
+        return (
+            'assessmentId' in value &&
+            typeof value.assessmentId === 'string' &&
+            this.handles.has(value.assessmentId) &&
+            'disposition' in value &&
+            'adherence' in value
+        );
+    }
+
+    /** Inward, a handle maps back to its canonical ID; outward, an ID becomes its model handle. */
+    private translateIdentifier(value: string, outward: boolean): string {
         if (!outward) return this.canonical.get(value) ?? value;
         if (Object.hasOwn(this.evidence, value)) return this.evidenceHandle(value);
         return this.handles.get(value) ?? value;

@@ -784,6 +784,22 @@ describe('source-range developer accounts', () => {
         }
         expect(input).toEqual(original);
     });
+    it('shows an identical finding once while retaining both governing criteria', () => {
+        const first = account(0);
+        const second = { ...first, findingId: 'duplicate', assessmentIds: ['rule-1'] };
+        const body = renderAssessmentComment({
+            ...state,
+            entries: [0, 1].map((index) => ({
+                ...state.entries[0],
+                assessmentId: `rule-${index}`,
+                title: `rule-${index}`,
+            })),
+            findings: [first, second],
+        });
+        expect(body.split(first.explanation)).toHaveLength(2);
+        expect(body).toContain('rule-0');
+        expect(body).toContain('rule-1');
+    });
     it('keeps different pinned ranges separate and excludes unverified candidates', () => {
         const first = account(0),
             second = account(1),

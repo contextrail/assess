@@ -174,6 +174,7 @@ export class Diagnostics {
                     'provider_retry',
                     'provider_recovered',
                     'provider_retry_exhausted',
+                    'provider_speed_unavailable',
                     'assessment_finalized',
                 ].includes(kind))
         )

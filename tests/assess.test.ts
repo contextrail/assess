@@ -29,6 +29,64 @@ import {
     assessmentCoverage,
 } from '../src/presentation.js';
 import type { Publication, PublishedReader } from '../src/contracts.js';
+
+/**
+ * Runs here read fixed fixture snapshots. Each distinct source request is answered by git once per file and
+ * replayed afterwards: a fixed snapshot is content-addressed, so the same commits, trees, limits and request
+ * always produce the same answer wherever the repository copy lives. Failures are never recorded, an aborted
+ * request always reaches the real source, and methods stay on the prototype so tests can still spy on them.
+ * The git boundary itself is covered by the contract tests.
+ */
+const { replayingSource } = vi.hoisted(() => ({
+    replayingSource(Base: typeof FixedSnapshotSource): typeof FixedSnapshotSource {
+        const recorded = new Map<string, Promise<unknown>>();
+        const identities = new WeakMap<object, string[]>();
+        class ReplayedSnapshotSource extends Base {
+            constructor(...args: ConstructorParameters<typeof FixedSnapshotSource>) {
+                super(...args);
+                const [{ base, head }] = args;
+                identities.set(this, [base.commit, base.tree, head.commit, head.tree]);
+            }
+        }
+        for (const method of ['list', 'changes', 'changeInventory', 'diff', 'read', 'search'] as const) {
+            const real = Base.prototype[method] as (...input: unknown[]) => Promise<unknown>;
+            Object.defineProperty(ReplayedSnapshotSource.prototype, method, {
+                configurable: true,
+                writable: true,
+                value: async function (this: FixedSnapshotSource, ...input: unknown[]) {
+                    const control = (method === 'changeInventory' ? input[0] : input[1]) as
+                        { signal?: AbortSignal } | undefined;
+                    if (control?.signal?.aborted) return real.apply(this, input);
+                    const request = method === 'changeInventory' ? null : (input[0] ?? null);
+                    const key = JSON.stringify([method, identities.get(this), this.limits, request]);
+                    let answer = recorded.get(key);
+                    if (!answer) {
+                        answer = real.apply(this, input);
+                        recorded.set(key, answer);
+                        answer.catch(() => recorded.delete(key));
+                    }
+                    return structuredClone(await answer);
+                },
+            });
+        }
+        return ReplayedSnapshotSource;
+    },
+}));
+vi.mock('../src/source.js', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('../src/source.js')>();
+    return { ...actual, FixedSnapshotSource: replayingSource(actual.FixedSnapshotSource) };
+});
+// Provider retry backoff is asserted in provider-timeout.test.ts; skip the wait here but keep abort behavior.
+// Tests of cancellation during backoff opt back in to the real wait.
+const backoff = vi.hoisted(() => ({ real: false }));
+vi.mock('node:timers/promises', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('node:timers/promises')>();
+    return {
+        ...actual,
+        setTimeout: async (ms: number, value: unknown, options?: { signal?: AbortSignal }) =>
+            backoff.real ? actual.setTimeout(ms, value, options) : options?.signal?.throwIfAborted(),
+    };
+});
 import { ProviderAccountingError, providerFailureDiagnostics, type AssessmentProvider } from '../src/providers.js';
 
 function assertStrictObjects(value: unknown): void {
@@ -43,6 +101,7 @@ function assertStrictObjects(value: unknown): void {
 
 const directories: string[] = [];
 afterEach(() => {
+    backoff.real = false;
     vi.unstubAllEnvs();
     for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -66,7 +125,14 @@ async function preparedFixture() {
 async function createPreparedFixture(count = 2) {
     const contextNames = count === 2 ? ['a', 'b'] : Array.from({ length: count }, (_, i) => `context${i}`);
     const repository = mkdtempSync(join(tmpdir(), 'c3-wire-'));
-    const git = (...args: string[]) => execFileSync('git', ['-C', repository, ...args], { encoding: 'utf8' }).trim();
+    // Fixed dates give identical fixtures identical commit IDs, so replayed source answers carry across them.
+    const dated = {
+        ...process.env,
+        GIT_AUTHOR_DATE: '2026-01-01T00:00:00Z',
+        GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z',
+    };
+    const git = (...args: string[]) =>
+        execFileSync('git', ['-C', repository, ...args], { encoding: 'utf8', env: dated }).trim();
     git('init', '-q');
     git('config', 'user.name', 'Fixture');
     git('config', 'user.email', 'fixture@example.invalid');
@@ -770,6 +836,23 @@ describe('human change summary handoff', () => {
                       : failure,
             );
             expect(result.state.decision?.exitCode).toBe(failure === 'model_stopped' ? 1 : 2);
+            // The diagnostic code tells the run summary why the summary phase failed.
+            const phaseFailures = readFileSync(join(result.directory, 'diagnostics.jsonl'), 'utf8')
+                .trim()
+                .split('\n')
+                .map((line) => JSON.parse(line) as { kind: string; data: { workUnitId: string; code: string } })
+                .filter((event) => event.kind === 'phase_failed')
+                .map((event) => [event.data.workUnitId, event.data.code]);
+            expect(phaseFailures).toEqual([
+                [
+                    'change-summary',
+                    failure === 'cancelled'
+                        ? 'phase_deadline_or_cancelled'
+                        : failure === 'max_turns' || failure === 'model_stopped'
+                          ? failure
+                          : 'provider_or_execution_failed',
+                ],
+            ]);
         },
     );
     it('does not request a reader summary when the assessor supplies none', async () => {
@@ -1325,6 +1408,77 @@ describe('governed phase execution through actual SDK provider wires', () => {
             }
         },
     );
+    it.each([
+        [undefined, 12],
+        [30, 30],
+    ])('limits each verification to maxVerifyCalls=%s model calls', async (maxVerifyCalls, expected) => {
+        vi.stubEnv('OPENROUTER_API_KEY', 'test-secret-key-never-capture');
+        const prepared = await preparedFixture();
+        const result = await runAssessment({
+            ...fixtureOptions(prepared),
+            ...(maxVerifyCalls ? { limits: { maxVerifyCalls } } : {}),
+            fetch: fixtureWire(prepared),
+        });
+        expect(result.state.decision).toMatchObject({ complete: true });
+        expect(result.state.phases.map((phase) => [phase.phase, phase.configuration.maxPhaseCalls])).toEqual([
+            ['assess', 60],
+            ['verify', expected],
+            ['verify', expected],
+        ]);
+    });
+
+    it('stops a verification that reaches its call limit without a verdict', async () => {
+        vi.stubEnv('OPENROUTER_API_KEY', 'test-secret-key-never-capture');
+        const prepared = await preparedFixture();
+        const wire = fixtureWire(prepared);
+        let call = 100;
+        const result = await runAssessment({
+            ...fixtureOptions(prepared),
+            limits: { maxVerifyCalls: 1 },
+            fetch: async (input, init) =>
+                phaseRequest(JSON.parse(init!.body as string), prepared).phase === 'verify'
+                    ? response(
+                          'openrouter',
+                          [{ name: 'read_source', input: { side: 'head', path: 'route.ts' } }],
+                          call++,
+                      )
+                    : wire(input, init),
+        });
+        expect(result.state.decision).toMatchObject({ complete: false });
+        expect(result.state.execution.stopReason).toBe('model_call_limit');
+    });
+
+    it('continues at the served tier when the model rejects the requested speed', async () => {
+        vi.stubEnv('OPENROUTER_API_KEY', 'test-secret-key-never-capture');
+        const prepared = await preparedFixture();
+        const wire = fixtureWire(prepared);
+        const tiers: unknown[] = [];
+        const result = await runAssessment({
+            ...fixtureOptions(prepared),
+            speed: 'ultrafast',
+            fetch: async (input, init) => {
+                const tier = JSON.parse(init!.body as string).service_tier;
+                tiers.push(tier);
+                return tier
+                    ? new Response(JSON.stringify({ error: { message: 'service_tier ultrafast is not supported' } }), {
+                          status: 400,
+                      })
+                    : wire(input, init);
+            },
+        });
+        expect(result.state.decision).toMatchObject({ complete: true });
+        expect(result.state.execution.calls).toBe(4);
+        expect(tiers).toEqual(['ultrafast', undefined, undefined, undefined, undefined]);
+        const unavailable = readFileSync(join(result.directory, 'diagnostics.jsonl'), 'utf8')
+            .trim()
+            .split('\n')
+            .map((line) => JSON.parse(line))
+            .filter((event) => event.kind === 'provider_speed_unavailable');
+        expect(unavailable.map((event) => event.data)).toEqual([
+            { model: 'fixture-model', expected: 'ultrafast', actual: null },
+        ]);
+    });
+
     it.each(['send', 'off', 'rejected', 'network'] as const)(
         'minimal reporting %s preserves judged outcomes and excludes source/explanation',
         async (mode) => {
@@ -2387,6 +2541,7 @@ describe('one coherent investigation and one independent check', () => {
         }
     });
     it('reports deadline cancellation during backoff as a budget stop', async () => {
+        backoff.real = true;
         vi.stubEnv('OPENROUTER_API_KEY', 'test-key');
         const prepared = await preparedFixture();
         const result = await runAssessment({
@@ -2398,6 +2553,7 @@ describe('one coherent investigation and one independent check', () => {
         expect(result.state.verification.verified).toBe(0);
     });
     it('honors cancellation during recovery backoff', async () => {
+        backoff.real = true;
         vi.stubEnv('OPENROUTER_API_KEY', 'test-key');
         const prepared = await preparedFixture();
         const controller = new AbortController();

@@ -1447,4 +1447,12 @@ it('reconstructs candidate findings from sealed observation and concern handoffs
     expect(validate({ ...report, observations: [{ ...observation, observation: 'Rewritten evidence' }] })).toThrow(
         'publication_observations_changed',
     );
+    // A summary may be published as verified only with its own completed verification record.
+    const forgedSummary = { overview: 'All release gates passed.', reviewFocus: [], sourceRefs: [] };
+    expect(
+        validate({
+            ...report,
+            changeSummary: { status: 'verified', candidate: forgedSummary, accepted: forgedSummary },
+        }),
+    ).toThrow('publication_summary_unverified');
 });

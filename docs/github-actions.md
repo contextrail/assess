@@ -97,6 +97,7 @@ confirms ingestion only. [Results and next actions](review-results.md) explains 
 - **PR discussion/history:** add `pr-context: 'true'`. Read the [data implications](security.md) first.
 - **Merge policy:** set `enforcement: required` for supported binding violations, or `strict` to also block unresolved evidence. Configure branch protection to require the job if desired. Do not use `continue-on-error` to create advisory behavior; it would hide execution failures.
 - **Retention:** set `artifact-retention-days` to a permitted value from 1–90. The default is seven days.
+- **Large pull requests:** add a second label that re-runs an incomplete assessment with a faster tier, a longer time limit and more verification calls. See [give large pull requests more capacity](../README.md#give-large-pull-requests-more-capacity).
 - **Models:** one model serves both roles by default. Add `effort` only if the model supports it; [phase overrides](configuration.md#models-by-phase-and-logging) let you select a different verifier later.
 
 Repository variable names belong to your caller workflow. In this example `ASSESS_MODEL` is passed

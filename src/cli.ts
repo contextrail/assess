@@ -10,6 +10,7 @@ import { loadAssessmentCheckpoint } from './resume.js';
 import { runAssessment, DEFAULT_EXECUTION_LIMITS, type ExecutionLimits } from './assess.js';
 import { DEFAULT_SOURCE_LIMITS, type SourceLimits } from './source.js';
 import { providerTransportDiagnostics, type ProviderConfiguration } from './providers.js';
+import { PROVIDER_SPEEDS, type ProviderSpeed } from './speed.js';
 import { DEFAULT_POLICY, type AssessmentPolicy } from './results.js';
 import { prepareGitHubAssessment, publishGitHubAssessment } from './github.js';
 
@@ -21,6 +22,7 @@ const executionFlags = {
     'max-output-tokens': 'maxOutputTokens',
     'max-total-tokens': 'maxTotalTokens',
     'max-time-ms': 'maxTimeMs',
+    'max-verify-calls': 'maxVerifyCalls',
 } as const;
 const sourceFlags = {
     'source-page-entries': 'pageEntries',
@@ -46,6 +48,8 @@ run requires --provider openai|openrouter and --model PROVIDER_NATIVE_ID
 (or CONTEXTRAIL_ASSESS_PROVIDER / CONTEXTRAIL_ASSESS_MODEL). CLI overrides environment.
 Credentials: OPENAI_API_KEY / OPENROUTER_API_KEY. No implicit provider/model fallback.
 --effort none|minimal|low|medium|high|xhigh (provider/model must support it).
+--speed normal|fast|ultrafast (default normal) requests the provider's priority or ultrafast service tier;
+an unsupported tier is reported and the run continues at the tier the provider serves.
 --phase-models JSON overrides assess/verify with explicit {provider,model,effort?} objects.
 --log-level quiet|info|debug (default info).
 --purpose TEXT supplies caller-stated objective/stage; no inferred objective is treated as approved.
@@ -58,6 +62,7 @@ Exit 0: allowed by enforcement policy (not proof of compliance); 1: policy block
 
 Execution settings: --max-turns N, --max-output-tokens N, --max-total-tokens N, --max-time-ms N.
 Default: unset (no package ceiling; provider output/context constraints still apply).
+--max-verify-calls N sets model calls per verification (default 12); raise it for large changes.
 Total-token cutoff is observed after calls, can overshoot by one call; missing usage prevents enforcement.
 Per-call output allowance includes provider reasoning tokens where applicable.
 Source response/operation settings (positive integers, read-bytes >=4):
@@ -100,6 +105,7 @@ function readArguments() {
             provider: { type: 'string' },
             model: { type: 'string' },
             effort: { type: 'string' },
+            speed: { type: 'string' },
             'phase-models': { type: 'string' },
             'log-level': { type: 'string' },
             repository: { type: 'string' },
@@ -261,6 +267,7 @@ function commandSettings(values: CliValues, isAssessment: boolean) {
         provider: undefined as ProviderConfiguration | undefined,
         phaseModels: {} as Partial<Record<'assess' | 'verify', ProviderConfiguration>>,
         logLevel: 'info' as 'quiet' | 'info' | 'debug',
+        speed: 'normal' as ProviderSpeed,
         limits: { ...DEFAULT_EXECUTION_LIMITS },
         sourceLimits: {} as Partial<SourceLimits>,
         policy: { ...DEFAULT_POLICY },
@@ -268,6 +275,8 @@ function commandSettings(values: CliValues, isAssessment: boolean) {
     if (!isAssessment) return { setting, resumePath, feedback, repositoryAttribution, ...defaults };
     const provider = readProvider(setting);
     const phaseModels = readPhaseModels(setting('phase-models'));
+    const speed = setting('speed') ?? 'normal';
+    if (!PROVIDER_SPEEDS.includes(speed as ProviderSpeed)) throw new CliInputError('Invalid --speed. See --help.');
     const level = setting('log-level') ?? 'info';
     if (!['quiet', 'info', 'debug'].includes(level)) throw new CliInputError('Invalid log-level.');
     const logLevel = level as typeof defaults.logLevel;
@@ -280,6 +289,7 @@ function commandSettings(values: CliValues, isAssessment: boolean) {
         repositoryAttribution,
         provider,
         phaseModels,
+        speed: speed as ProviderSpeed,
         logLevel,
         ...limits,
         policy,
@@ -315,6 +325,7 @@ async function runCommand(values: CliValues, isAssessment: boolean) {
         repositoryAttribution,
         provider,
         phaseModels,
+        speed,
         logLevel,
         limits,
         sourceLimits,
@@ -363,6 +374,7 @@ async function runCommand(values: CliValues, isAssessment: boolean) {
                 resume: resumed?.checkpoint,
                 provider: provider!,
                 phaseModels,
+                speed,
                 logLevel,
                 policy,
                 limits,

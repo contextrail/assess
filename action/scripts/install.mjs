@@ -54,6 +54,7 @@ function validateModelConfiguration() {
         !bounded(e.MODEL, /^[A-Za-z0-9._:/-]+$/, 200) ||
         !['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(e.EFFORT) ||
         !positive(e.MAX_TIME_MS, 2147483647) ||
+        (e.MAX_VERIFY_CALLS && !positive(e.MAX_VERIFY_CALLS, Number.MAX_SAFE_INTEGER)) ||
         !['send', 'off'].includes(e.FEEDBACK) ||
         !['advisory', 'required', 'strict'].includes(e.ENFORCEMENT || 'advisory')
     )
@@ -105,8 +106,10 @@ function eventComparison() {
 function configuration(startedAt) {
     const phaseModels = parsePhaseModels();
     const logLevel = e.LOG_LEVEL || 'info';
+    const speed = e.SPEED || 'normal';
     if (
         !['quiet', 'info', 'debug'].includes(logLevel) ||
+        !['normal', 'fast', 'ultrafast'].includes(speed) ||
         (e.INLINE_COMMENTS && !['true', 'false'].includes(e.INLINE_COMMENTS)) ||
         (e.INLINE_COMMENTS === 'true' && e.POST_COMMENT !== 'true')
     )
@@ -123,10 +126,12 @@ function configuration(startedAt) {
         provider: e.PROVIDER,
         model: e.MODEL,
         effort: e.EFFORT,
+        speed,
         phaseModels,
         logLevel,
         inlineComments: e.INLINE_COMMENTS === 'true',
         maxTimeMs: e.MAX_TIME_MS,
+        maxVerifyCalls: e.MAX_VERIFY_CALLS || '',
         feedback: e.FEEDBACK,
         enforcement: e.ENFORCEMENT || 'advisory',
         repositoryAttribution: e.REPOSITORY_ATTRIBUTION === 'true',

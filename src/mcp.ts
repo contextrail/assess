@@ -80,25 +80,12 @@ export class McpPublishedReader implements PublishedReader {
             const result = await this.client.callTool(
                 {
                     name,
-                    arguments: {
-                        ...args,
-                        environment: {
-                            repository: this.options.repositoryAttribution
-                                ? this.repository
-                                : { status: 'unavailable', reason: 'withheld' },
-                            harness: { status: 'reported', name: 'contextrail-assess' },
-                            model: { status: 'unavailable', reason: 'not_exposed' },
-                        },
-                    },
+                    arguments: { ...args, environment: this.environment() },
                 },
                 requestOptions(),
             );
             if (result.isError) {
-                const error = (result.structuredContent as { error?: { code?: unknown } } | undefined)?.error;
-                const code =
-                    typeof error?.code === 'string' && /^[a-z_]{3,80}$/u.test(error.code)
-                        ? error.code
-                        : 'mcp_read_rejected';
+                const code = toolErrorCode(result.structuredContent);
                 throw new PreparationReadError(code, { phase, category: serviceCategory(code) });
             }
             phase = 'decode';
@@ -110,9 +97,24 @@ export class McpPublishedReader implements PublishedReader {
             throw safeReadFailure(error, phase, this.options.signal?.aborted, this.responseStatus);
         }
     }
+    /** Repository attribution only when enabled; the harness is named and the model is never exposed. */
+    private environment() {
+        return {
+            repository: this.options.repositoryAttribution
+                ? this.repository
+                : { status: 'unavailable', reason: 'withheld' },
+            harness: { status: 'reported', name: 'contextrail-assess' },
+            model: { status: 'unavailable', reason: 'not_exposed' },
+        };
+    }
     async close(): Promise<void> {
         await this.client.close().catch(() => undefined);
     }
+}
+/** A service error code passes through only in the expected snake_case shape. */
+function toolErrorCode(structuredContent: unknown): string {
+    const error = (structuredContent as { error?: { code?: unknown } } | undefined)?.error;
+    return typeof error?.code === 'string' && /^[a-z_]{3,80}$/u.test(error.code) ? error.code : 'mcp_read_rejected';
 }
 function serviceCategory(code: string): string {
     if (['graph_node_not_found', 'graph_node_unpublished', 'graph_node_published_version_missing'].includes(code))
@@ -137,36 +139,49 @@ export function safeReadFailure(
     cancelled = false,
     responseStatus?: number,
 ): PreparationReadError {
-    const source =
-        error && typeof error === 'object'
-            ? (error as { name?: unknown; code?: unknown; status?: unknown; data?: { status?: unknown } })
-            : {};
+    const source: FailureSource = error && typeof error === 'object' ? (error as FailureSource) : {};
+    const status = httpStatus(source, responseStatus);
+    const upstreamCode = recognizedUpstreamCode(source.code);
+    return new PreparationReadError(failureCode(source, status, cancelled, hasInvalidResponseCause(error)), {
+        phase,
+        ...(status ? { status } : {}),
+        ...(upstreamCode !== undefined ? { upstreamCode } : {}),
+    });
+}
+
+type FailureSource = { name?: unknown; code?: unknown; status?: unknown; data?: { status?: unknown } };
+
+const SDK_CODES = [
+    'REQUEST_TIMEOUT',
+    'CLIENT_HTTP_AUTHENTICATION',
+    'CLIENT_HTTP_FORBIDDEN',
+    'CLIENT_HTTP_NOT_IMPLEMENTED',
+    'CLIENT_HTTP_UNEXPECTED_CONTENT',
+    'INVALID_RESULT',
+    'CONNECTION_CLOSED',
+    'ERA_NEGOTIATION_FAILED',
+];
+
+/** The error's own HTTP status, or the transport's when it is an error status. */
+function httpStatus(source: FailureSource, responseStatus: number | undefined): number | undefined {
     const statusValue =
         source.status ?? source.data?.status ?? (responseStatus && responseStatus >= 400 ? responseStatus : undefined);
-    const status =
-        typeof statusValue === 'number' && Number.isInteger(statusValue) && statusValue >= 100 && statusValue <= 599
-            ? statusValue
-            : undefined;
-    const sdkCodes = [
-        'REQUEST_TIMEOUT',
-        'CLIENT_HTTP_AUTHENTICATION',
-        'CLIENT_HTTP_FORBIDDEN',
-        'CLIENT_HTTP_NOT_IMPLEMENTED',
-        'CLIENT_HTTP_UNEXPECTED_CONTENT',
-        'INVALID_RESULT',
-        'CONNECTION_CLOSED',
-        'ERA_NEGOTIATION_FAILED',
-    ];
-    const upstreamCode =
-        (typeof source.code === 'string' && sdkCodes.includes(source.code)) ||
-        (typeof source.code === 'number' &&
-            Number.isInteger(source.code) &&
-            source.code >= -32768 &&
-            source.code <= 32767)
-            ? (source.code as string | number)
-            : undefined;
-    let cause = error;
+    return typeof statusValue === 'number' && Number.isInteger(statusValue) && statusValue >= 100 && statusValue <= 599
+        ? statusValue
+        : undefined;
+}
+
+/** A recognized SDK code or a JSON-RPC-sized integer code; anything else is dropped. */
+function recognizedUpstreamCode(code: unknown): string | number | undefined {
+    if (typeof code === 'string' && SDK_CODES.includes(code)) return code;
+    if (typeof code === 'number' && Number.isInteger(code) && code >= -32768 && code <= 32767) return code;
+    return undefined;
+}
+
+/** A parse or schema failure anywhere in the first four causes means the response itself was invalid. */
+function hasInvalidResponseCause(error: unknown): boolean {
     let invalidResponse = false;
+    let cause = error;
     for (let depth = 0; depth < 4 && cause && typeof cause === 'object'; depth++) {
         const nested = cause as { name?: unknown; code?: unknown; cause?: unknown };
         if (
@@ -176,25 +191,20 @@ export function safeReadFailure(
             invalidResponse = true;
         cause = nested.cause;
     }
-    const code =
-        cancelled || source.name === 'AbortError'
-            ? 'mcp_cancelled'
-            : source.name === 'TimeoutError' || source.code === 'REQUEST_TIMEOUT'
-              ? 'mcp_timeout'
-              : status === 401 || source.code === 'CLIENT_HTTP_AUTHENTICATION'
-                ? 'mcp_authentication_failed'
-                : status === 403 || source.code === 'CLIENT_HTTP_FORBIDDEN'
-                  ? 'mcp_authorization_failed'
-                  : status
-                    ? 'mcp_http_failed'
-                    : invalidResponse || source.code === -32700
-                      ? 'invalid_mcp_response'
-                      : typeof source.code === 'number'
-                        ? 'mcp_provider_failed'
-                        : 'mcp_transport_failed';
-    return new PreparationReadError(code, {
-        phase,
-        ...(status ? { status } : {}),
-        ...(upstreamCode !== undefined ? { upstreamCode } : {}),
-    });
+    return invalidResponse;
+}
+
+function failureCode(
+    source: FailureSource,
+    status: number | undefined,
+    cancelled: boolean,
+    invalidResponse: boolean,
+): string {
+    if (cancelled || source.name === 'AbortError') return 'mcp_cancelled';
+    if (source.name === 'TimeoutError' || source.code === 'REQUEST_TIMEOUT') return 'mcp_timeout';
+    if (status === 401 || source.code === 'CLIENT_HTTP_AUTHENTICATION') return 'mcp_authentication_failed';
+    if (status === 403 || source.code === 'CLIENT_HTTP_FORBIDDEN') return 'mcp_authorization_failed';
+    if (status) return 'mcp_http_failed';
+    if (invalidResponse || source.code === -32700) return 'invalid_mcp_response';
+    return typeof source.code === 'number' ? 'mcp_provider_failed' : 'mcp_transport_failed';
 }

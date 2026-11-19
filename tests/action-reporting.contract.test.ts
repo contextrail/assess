@@ -991,4 +991,84 @@ fs.writeFileSync('package-lock.json', '{}');
         expect(captured.ambient).toBeUndefined();
         expect(JSON.parse(readFileSync(join(root, 'assessment-status.json'), 'utf8')).exit).toBe(2);
     });
+
+    it.each([
+        ['normal', null],
+        ['fast', 'fast'],
+        ['ultrafast', 'ultrafast'],
+    ])('passes speed %s and verification calls to the CLI only when not defaults', (speed, expected) => {
+        const root = mkdtempSync(join(tmpdir(), 'review-action-speed-'));
+        roots.push(root);
+        const cli = join(root, 'tool/node_modules/@contextrail/assess/dist');
+        mkdirSync(cli, { recursive: true });
+        writeFileSync(join(cli, 'cli.js'), `console.log(JSON.stringify({ args: process.argv.slice(2) }));`);
+        writeFileSync(
+            join(root, 'config.json'),
+            JSON.stringify({
+                speed,
+                maxVerifyCalls: expected ? '30' : '',
+                provider: 'openrouter',
+                model: 'fixture',
+                reviewer,
+                maxTimeMs: '1000',
+                feedback: 'off',
+            }),
+        );
+        writeFileSync(join(root, 'comparison.json'), JSON.stringify({ base, head }));
+        spawnSync(process.execPath, [fileURLToPath(new URL('../action/scripts/assess.mjs', import.meta.url))], {
+            encoding: 'utf8',
+            env: {
+                PATH: process.env.PATH,
+                ASSESS_ROOT: root,
+                GITHUB_OUTPUT: join(root, 'output'),
+                CONTEXTRAIL_MCP_AUTH_TOKEN: 'fixture',
+                OPENROUTER_API_KEY: 'fixture',
+            },
+        });
+        const { args } = JSON.parse(readFileSync(join(root, 'cli-stdout.log'), 'utf8')) as { args: string[] };
+        expect(args.includes('--speed') ? args[args.indexOf('--speed') + 1] : null).toBe(expected);
+        expect(args.includes('--max-verify-calls') ? args[args.indexOf('--max-verify-calls') + 1] : null).toBe(
+            expected ? '30' : null,
+        );
+    });
+
+    it.each([
+        ['an unknown speed', { SPEED: 'warp' }, 'invalid_configuration'],
+        ['a zero verification call limit', { MAX_VERIFY_CALLS: '0' }, 'invalid_configuration'],
+        ['valid speed and verification settings', { SPEED: 'fast', MAX_VERIFY_CALLS: '30' }, null],
+    ])('checks %s before installing a package', (_name, settings, code) => {
+        const root = mkdtempSync(join(tmpdir(), 'review-action-capacity-'));
+        roots.push(root);
+        const result = spawnSync(
+            process.execPath,
+            [fileURLToPath(new URL('../action/scripts/install.mjs', import.meta.url))],
+            {
+                encoding: 'utf8',
+                env: {
+                    PATH: process.env.PATH,
+                    RUNNER_TEMP: root,
+                    GITHUB_OUTPUT: join(root, 'output'),
+                    PACKAGE_VERSION: '1.0.0',
+                    PR_NUMBER: '83',
+                    REVIEWER: reviewer,
+                    MCP_URL: 'https://example.com/mcp',
+                    MCP_ORG_ID: 'fixture',
+                    PROVIDER: 'openrouter',
+                    MODEL: 'fixture',
+                    EFFORT: '',
+                    MAX_TIME_MS: '1000',
+                    FEEDBACK: 'off',
+                    REPOSITORY_ATTRIBUTION: 'false',
+                    ARTIFACT_RETENTION_DAYS: '7',
+                    GITHUB_REPOSITORY: 'acme/project',
+                    GITHUB_SERVER_URL: 'https://github.com',
+                    ...settings,
+                },
+            },
+        );
+        const installedRoot = readFileSync(join(root, 'output'), 'utf8').match(/^root=(.+)$/m)![1]!;
+        const status = JSON.parse(readFileSync(join(installedRoot, 'setup-status.json'), 'utf8'));
+        if (code) expect([result.status, status.code]).toEqual([2, code]);
+        else expect(status.code).not.toBe('invalid_configuration');
+    });
 });

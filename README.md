@@ -71,6 +71,121 @@ Source excerpts and selected guidance are sent to your chosen model provider. De
 quotes and conversations are not included in ContextRail's assessment-feedback payload.
 See [where data goes](docs/security.md) before connecting a repository.
 
+## Give large pull requests more capacity
+
+A standard run keeps cost and time predictable. A large pull request can stop before it finishes:
+the PR comment reports an incomplete assessment, and the run's stop reason is `max_time_ms` (time
+limit reached) or `model_call_limit` (a verification used all its model calls). You do not have to
+change how your team sizes pull requests. Instead, let a maintainer re-run that PR with more capacity
+by adding a second label.
+
+Three Action inputs set a run's capacity:
+
+| Input              | Standard run       | Suggested extended run | What it changes                                                                                                                                                                                          |
+| ------------------ | ------------------ | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `speed`            | `normal` (default) | `fast`                 | Requests the provider's priority tier: quicker calls at a higher per-token price. `ultrafast` is also accepted. If a model doesn't serve a tier, Assess logs `provider_speed_unavailable` and continues. |
+| `max-time-ms`      | `600000` (10 min)  | `1500000` (25 min)     | Model time limit for the run. Keep the job's `timeout-minutes` about 10 minutes above it for setup and publishing.                                                                                       |
+| `max-verify-calls` | empty (12)         | `30`                   | Model calls each finding's independent verification may use.                                                                                                                                             |
+
+### 1. Create the labels
+
+```sh
+gh label create contextrail-assess --color 1D76DB \
+  --description "Run ContextRail Assess on this pull request"
+gh label create contextrail-assess-extended --color 5319E7 \
+  --description "Re-run ContextRail Assess with extended capacity"
+```
+
+In the GitHub UI: **Pull requests → Labels → New label**. Any names work if the workflow uses the same ones.
+
+### 2. Optionally tune the extended run
+
+The workflow below has built-in defaults. To change them without editing it, set repository variables:
+
+```sh
+gh variable set ASSESS_EXTENDED_SPEED --body fast
+gh variable set ASSESS_EXTENDED_MAX_TIME_MS --body 1500000
+gh variable set ASSESS_EXTENDED_MAX_VERIFY_CALLS --body 30
+```
+
+In the GitHub UI: **Settings → Secrets and variables → Actions → Variables → New repository variable**.
+These names belong to your workflow; the Action itself reads only its inputs. Set up the connection
+variables and secrets first, as described in [GitHub Actions](docs/github-actions.md#prepare-the-repository-settings).
+
+### 3. Add the workflow
+
+Save as `.github/workflows/contextrail-assess.yml` on the default branch and replace the reviewer skill ID:
+
+```yaml
+name: ContextRail Assess
+on:
+    pull_request_target:
+        types: [labeled]
+permissions: {}
+concurrency:
+    group: contextrail-assess-${{ github.repository }}-${{ github.event.pull_request.number }}
+    cancel-in-progress: false
+jobs:
+    assess:
+        # Only maintainers with triage or write access can add labels. Same-repository human PRs only.
+        if: >-
+            (github.event.label.name == 'contextrail-assess' ||
+            github.event.label.name == 'contextrail-assess-extended') &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            github.event.pull_request.user.type == 'User'
+        runs-on: ubuntu-latest
+        timeout-minutes: 35
+        permissions:
+            contents: read
+            pull-requests: write
+        env:
+            EXTENDED: ${{ github.event.label.name == 'contextrail-assess-extended' }}
+        steps:
+            - name: Assess proposed changes
+              uses: contextrail/assess/action@v1-alpha
+              with:
+                  pr-number: ${{ github.event.pull_request.number }}
+                  reviewer: skill://engineering/your-reviewer
+                  mcp-url: ${{ vars.CONTEXTRAIL_MCP_URL }}
+                  mcp-org-id: ${{ vars.CONTEXTRAIL_MCP_ORG_ID }}
+                  mcp-auth-token: ${{ secrets.CONTEXTRAIL_MCP_AUTH_TOKEN }}
+                  provider: openai
+                  model: ${{ vars.ASSESS_MODEL }}
+                  openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+                  enforcement: advisory
+                  post-comment: 'true'
+                  speed: ${{ env.EXTENDED == 'true' && (vars.ASSESS_EXTENDED_SPEED || 'fast') || 'normal' }}
+                  max-time-ms: ${{ env.EXTENDED == 'true' && (vars.ASSESS_EXTENDED_MAX_TIME_MS || '1500000') || '600000' }}
+                  max-verify-calls: ${{ env.EXTENDED == 'true' && (vars.ASSESS_EXTENDED_MAX_VERIFY_CALLS || '30') || '' }}
+```
+
+The job never checks out or runs pull request code, which is what makes `pull_request_target`
+safe to use with secrets here. Do not add steps that do.
+
+To also review every pull request when it is opened, set `types: [opened, ready_for_review, labeled]`
+and make the first part of `if` accept those events too. Each opened pull request then starts one paid run:
+
+```yaml
+if: >-
+    (((github.event.action == 'opened' || github.event.action == 'ready_for_review') &&
+    !github.event.pull_request.draft) ||
+    github.event.label.name == 'contextrail-assess' ||
+    github.event.label.name == 'contextrail-assess-extended') &&
+    github.event.pull_request.head.repo.full_name == github.repository &&
+    github.event.pull_request.user.type == 'User'
+```
+
+### 4. Run it
+
+```sh
+gh pr edit 123 --add-label contextrail-assess           # standard run
+gh pr edit 123 --add-label contextrail-assess-extended  # after an incomplete run
+```
+
+In the GitHub UI: open the pull request and choose the label under **Labels** in the sidebar.
+Each label addition starts a new paid run. To run again with the same label, remove it and add it
+back. **Re-run jobs** replays the original event and is rejected if the pull request has changed since.
+
 ## Package and platform
 
 Assess is an open-source execution tool for the ContextRail platform. Your organization maintains

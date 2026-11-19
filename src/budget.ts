@@ -4,12 +4,16 @@ export type ExecutionLimits = {
     maxOutputTokens: number | null;
     maxTotalTokens: number | null;
     maxTimeMs: number | null;
+    /** Model calls per verification work unit; null keeps the package default. */
+    maxVerifyCalls: number | null;
 };
+export const DEFAULT_VERIFY_CALLS = 12;
 export const DEFAULT_EXECUTION_LIMITS: ExecutionLimits = {
     maxTurns: null,
     maxOutputTokens: null,
     maxTotalTokens: null,
     maxTimeMs: null,
+    maxVerifyCalls: null,
 };
 export class BudgetStop extends Error {
     constructor(readonly code: string) {

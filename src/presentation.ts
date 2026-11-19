@@ -502,65 +502,72 @@ function renderChangeCounts(counts: ReturnType<typeof countChanges>): string {
 }
 /** Human orientation is separate from the governed result and never controls enforcement. */
 export function renderReaderGuidance(input: unknown): string {
-    const state = object(input),
-        summary = object(state.changeSummary),
-        accepted = object(summary.accepted);
-    const lines = ['#### Changes and reviewer focus'];
-    if (summary.status === 'verified' && typeof accepted.overview === 'string') {
-        lines.push(markdownText(accepted.overview, 2000));
-        const focus = Array.isArray(accepted.reviewFocus)
-            ? accepted.reviewFocus.filter((item): item is string => typeof item === 'string')
-            : [];
-        if (focus.length)
-            lines.push(
-                'Suggested review focus:\n\n' +
-                    focus
-                        .slice(0, 5)
-                        .map((item) => `- ${markdownText(item, 1000)}`)
-                        .join('\n'),
-            );
-        const locations = objects(accepted.sourceRefs)
-            .map((citation) => `${string(object(citation.provenance).path)}:${object(citation.location).line ?? '?'}`)
-            .filter((location) => !location.startsWith(':'))
-            .join(', ');
-        lines.push(
-            'Source-grounded summary, independently checked; separate from adherence.' +
-                (locations ? ` Sources: ${markdownText(locations, 1000)}.` : ''),
-        );
-    } else {
-        lines.push(
-            'No independently checked narrative summary is available. The prepared file inventory below still describes the comparison.',
-        );
-    }
+    const state = object(input);
+    const lines = ['#### Changes and reviewer focus', ...changeSummaryLines(object(state.changeSummary))];
     const followUps = objects(state.followUps).filter((item) => item.kind !== 'external_evidence');
-    if (followUps.length) {
-        lines.push(
-            '#### Human and operational follow-ups',
-            'These remain separate from artifact adherence. An assessment outcome does not establish that operational duties were completed.',
-        );
-        for (const item of followUps) {
-            const kind = item.kind === 'operational_check' ? 'Operational check' : 'Human check';
-            const status =
-                item.verified === true
-                    ? item.required === true
-                        ? 'mandatory — pending'
-                        : 'suggested'
-                    : 'unverified proposal';
-            const criterion = findingCriteria([{ assessmentIds: [item.assessmentId] }], objects(state.entries));
-            const locations = objects(item.sourceRefs)
-                .map(
-                    (citation) =>
-                        `${string(object(citation.provenance).path)}:${object(citation.location).line ?? '?'}`,
-                )
-                .join(', ');
-            lines.push(
-                `- **${kind}: ${status}.** ${markdownText(item.explanation, 1200)} **Next:** ${markdownText(item.action, 1200)} Criterion: ${criterion}. Source: ${markdownText(locations, 500)}.`,
-            );
-        }
-    }
+    if (followUps.length) lines.push(...humanFollowUpLines(followUps, objects(state.entries)));
     const external = renderExternalFollowUps(state, false);
     if (external) lines.push(external);
     return lines.join('\n\n');
+}
+
+/** `path:line` for each citation; `?` marks a citation without a line. */
+function citationLocations(citations: unknown): string[] {
+    return objects(citations).map(
+        (citation) => `${string(object(citation.provenance).path)}:${object(citation.location).line ?? '?'}`,
+    );
+}
+
+/** Only an independently verified summary is shown, with its review focus and source locations. */
+function changeSummaryLines(summary: Record<string, unknown>): string[] {
+    const accepted = object(summary.accepted);
+    if (summary.status !== 'verified' || typeof accepted.overview !== 'string')
+        return [
+            'No independently checked narrative summary is available. The prepared file inventory below still describes the comparison.',
+        ];
+    const lines = [markdownText(accepted.overview, 2000)];
+    const focus = Array.isArray(accepted.reviewFocus)
+        ? accepted.reviewFocus.filter((item): item is string => typeof item === 'string')
+        : [];
+    if (focus.length)
+        lines.push(
+            'Suggested review focus:\n\n' +
+                focus
+                    .slice(0, 5)
+                    .map((item) => `- ${markdownText(item, 1000)}`)
+                    .join('\n'),
+        );
+    const locations = citationLocations(accepted.sourceRefs)
+        .filter((location) => !location.startsWith(':'))
+        .join(', ');
+    lines.push(
+        'Source-grounded summary, independently checked; separate from adherence.' +
+            (locations ? ` Sources: ${markdownText(locations, 1000)}.` : ''),
+    );
+    return lines;
+}
+
+/** Human and operational checks stay separate from adherence; an outcome does not complete them. */
+function humanFollowUpLines(followUps: Record<string, unknown>[], entries: Record<string, unknown>[]): string[] {
+    const lines = [
+        '#### Human and operational follow-ups',
+        'These remain separate from artifact adherence. An assessment outcome does not establish that operational duties were completed.',
+    ];
+    for (const item of followUps) {
+        const kind = item.kind === 'operational_check' ? 'Operational check' : 'Human check';
+        const status =
+            item.verified === true
+                ? item.required === true
+                    ? 'mandatory — pending'
+                    : 'suggested'
+                : 'unverified proposal';
+        const criterion = findingCriteria([{ assessmentIds: [item.assessmentId] }], entries);
+        const locations = citationLocations(item.sourceRefs).join(', ');
+        lines.push(
+            `- **${kind}: ${status}.** ${markdownText(item.explanation, 1200)} **Next:** ${markdownText(item.action, 1200)} Criterion: ${criterion}. Source: ${markdownText(locations, 500)}.`,
+        );
+    }
+    return lines;
 }
 /** Group a shared external evidence boundary without merging the underlying assessment records. */
 function renderExternalFollowUps(state: Record<string, unknown>, compact: boolean): string {
@@ -735,7 +742,29 @@ function findingCriteria(accounts: Record<string, unknown>[], entries: Record<st
         })
         .join(', ');
 }
+function collapseIdenticalAccounts(accounts: Record<string, unknown>[]): Record<string, unknown>[] {
+    // A shared location alone does not establish duplicate meaning. Collapse only identical accounts.
+    const first = accounts[0]!;
+    const sameMeaning = accounts.every((account) =>
+        ['classification', 'explanation', 'consequence', 'correction'].every((key) => account[key] === first[key]),
+    );
+    if (sameMeaning && accounts.length > 1 && developerFindingGroupLabel(accounts) === 'the same source range')
+        accounts = [
+            {
+                ...first,
+                assessmentIds: [
+                    ...new Set(
+                        accounts.flatMap((account) =>
+                            Array.isArray(account.assessmentIds) ? account.assessmentIds : [],
+                        ),
+                    ),
+                ],
+            },
+        ];
+    return accounts;
+}
 function findingGroup(accounts: Record<string, unknown>[], entries: Record<string, unknown>[]): string {
+    accounts = collapseIdenticalAccounts(accounts);
     const finding = accounts[0]!;
     const criteria = findingCriteria(accounts, entries);
     const locations = objects(finding.locationRefs)
@@ -838,6 +867,71 @@ export function renderAssessmentReport(input: unknown, options: PresentationOpti
     lines.push(renderRunDetails(execution, usage, options));
     return lines.join('\n\n') + '\n';
 }
+function commentHeading(
+    state: Record<string, unknown>,
+    options: PresentationOptions,
+    verified: Record<string, unknown>[],
+    questions: Record<string, unknown>[],
+    pending: number,
+    failed: boolean,
+): string[] {
+    const violations = verified.filter((finding) => finding.classification === 'binding_violation').length;
+    const outcome = violations
+        ? `${violations} confirmed violation${violations === 1 ? '' : 's'}`
+        : 'No confirmed violations';
+    const headline = failed
+        ? 'Review could not finish'
+        : pending || (state.assessmentStatus !== 'complete' && !questions.length)
+          ? 'Assessment incomplete'
+          : outcome;
+    const policy = string(object(object(state.execution).policy).enforcement);
+    const lines = [
+        assessLogoBaseUrl
+            ? `### <picture><source media="(prefers-color-scheme: dark)" srcset="${assessLogoBaseUrl}/icon-dark.png"><img src="${assessLogoBaseUrl}/icon-light.png" height="22" alt="ContextRail"></picture>&nbsp; ContextRail Assess`
+            : '### ContextRail Assess',
+        `**${headline}${questions.length ? ` · ${questions.length} question${questions.length === 1 ? '' : 's'} remain${questions.length === 1 ? 's' : ''}` : ''}**${policy ? ` · ${markdownText(policy)}` : ''}`,
+    ];
+    if (failed)
+        lines.push(
+            options.failedStage
+                ? `Action ${markdownText(options.failedStage)} failed. Results below are partial; see run details.`
+                : 'Results below are partial. See the workflow run for the failure and retry details.',
+        );
+    return lines;
+}
+function commentQuestions(
+    state: Record<string, unknown>,
+    questions: Record<string, unknown>[],
+    options: PresentationOptions,
+): string[] {
+    if (questions.length) {
+        const lines = ['#### Needs your attention'];
+        for (const entry of questions) {
+            const result = object(entry.result),
+                action = questionAction(state, entry);
+            lines.push(
+                `- **${criterionTitle(entry)}:** ${briefText(result.explanation, 2)}${action ? ` **Next:** ${briefText(action, 1)}` : ''}${sourceLinks(result.citations, options)}`,
+            );
+        }
+        return lines;
+    }
+    return [];
+}
+function commentRunDetails(state: Record<string, unknown>, options: PresentationOptions, exit: unknown): string[] {
+    const execution = object(state.execution);
+    const details = renderRunDetails(execution, summarizeUsage(state), options);
+    const identity = `Run ID: ${markdownText(state.runId)}. Reviewer: ${markdownText(object(state.reviewer).title ?? object(state.reviewer).nodeId)} @ ${markdownText(object(state.reviewer).version)}. Exit: ${markdownText(exit ?? 'unavailable')}.`;
+    const lines = [details.replace('\n\n</details>', `\n\n${identity}\n\n</details>`)];
+    const links = [
+        isArtifactUrl(options.artifactUrl) ? `[Full audit](${options.artifactUrl})` : '',
+        runUrl(options.runUrl) ? `[Workflow run](${options.runUrl})` : '',
+        object(object(state.artifact).head).commit
+            ? `Reviewed ${markdownText(string(object(object(state.artifact).head).commit).slice(0, 7))}`
+            : '',
+    ].filter(Boolean);
+    if (links.length) lines.push(links.join(' · '));
+    return lines;
+}
 /** Compact developer view; the Action summary retains the complete audit explanation. */
 export function renderAssessmentComment(input: unknown, options: PresentationOptions = {}): string {
     const state = object(input),
@@ -852,29 +946,8 @@ export function renderAssessmentComment(input: unknown, options: PresentationOpt
     const failed = Boolean(
         options.failedStage || exit === 2 || (execution.stopReason && execution.stopReason !== 'finished'),
     );
-    const violations = verified.filter((finding) => finding.classification === 'binding_violation').length;
-    const outcome = violations
-        ? `${violations} confirmed violation${violations === 1 ? '' : 's'}`
-        : 'No confirmed violations';
     const pending = progress.awaitingVerification + progress.needsReassessment + progress.unexamined;
-    const headline = failed
-        ? 'Review could not finish'
-        : pending || (state.assessmentStatus !== 'complete' && !questions.length)
-          ? 'Assessment incomplete'
-          : outcome;
-    const policy = string(object(execution.policy).enforcement);
-    const lines = [
-        assessLogoBaseUrl
-            ? `### <picture><source media="(prefers-color-scheme: dark)" srcset="${assessLogoBaseUrl}/icon-dark.png"><img src="${assessLogoBaseUrl}/icon-light.png" height="22" alt="ContextRail"></picture>&nbsp; ContextRail Assess`
-            : '### ContextRail Assess',
-        `**${headline}${questions.length ? ` · ${questions.length} question${questions.length === 1 ? '' : 's'} remain${questions.length === 1 ? 's' : ''}` : ''}**${policy ? ` · ${markdownText(policy)}` : ''}`,
-    ];
-    if (failed)
-        lines.push(
-            options.failedStage
-                ? `Action ${markdownText(options.failedStage)} failed. Results below are partial; see run details.`
-                : 'Results below are partial. See the workflow run for the failure and retry details.',
-        );
+    const lines = commentHeading(state, options, verified, questions, pending, failed);
     const summary = object(state.changeSummary),
         accepted = object(summary.accepted);
     if (summary.status === 'verified' && typeof accepted.overview === 'string')
@@ -889,18 +962,10 @@ export function renderAssessmentComment(input: unknown, options: PresentationOpt
         );
     if (verified.length) {
         lines.push('#### Governed findings');
-        for (const finding of verified) lines.push(compactFinding(finding, entries, options));
+        for (const finding of groupDeveloperFindings(verified).flatMap(collapseIdenticalAccounts))
+            lines.push(compactFinding(finding, entries, options));
     }
-    if (questions.length) {
-        lines.push('#### Needs your attention');
-        for (const entry of questions) {
-            const result = object(entry.result),
-                action = questionAction(state, entry);
-            lines.push(
-                `- **${criterionTitle(entry)}:** ${briefText(result.explanation, 2)}${action ? ` **Next:** ${briefText(action, 1)}` : ''}${sourceLinks(result.citations, options)}`,
-            );
-        }
-    }
+    lines.push(...commentQuestions(state, questions, options));
     const externalFollowUps = renderExternalFollowUps(state, true);
     if (externalFollowUps) lines.push(externalFollowUps);
     lines.push(
@@ -924,17 +989,7 @@ export function renderAssessmentComment(input: unknown, options: PresentationOpt
             compactEvidence(state) +
             '\n\n</details>',
     );
-    const details = renderRunDetails(execution, summarizeUsage(state), options);
-    const identity = `Run ID: ${markdownText(state.runId)}. Reviewer: ${markdownText(object(state.reviewer).title ?? object(state.reviewer).nodeId)} @ ${markdownText(object(state.reviewer).version)}. Exit: ${markdownText(exit ?? 'unavailable')}.`;
-    lines.push(details.replace('\n\n</details>', `\n\n${identity}\n\n</details>`));
-    const links = [
-        isArtifactUrl(options.artifactUrl) ? `[Full audit](${options.artifactUrl})` : '',
-        runUrl(options.runUrl) ? `[Workflow run](${options.runUrl})` : '',
-        object(object(state.artifact).head).commit
-            ? `Reviewed ${markdownText(string(object(object(state.artifact).head).commit).slice(0, 7))}`
-            : '',
-    ].filter(Boolean);
-    if (links.length) lines.push(links.join(' · '));
+    lines.push(...commentRunDetails(state, options, exit));
     return lines.join('\n\n') + '\n';
 }
 function briefText(value: unknown, sentences: number): string {

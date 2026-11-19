@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { citationSchema, selectionSchema, type Citation, type EvidenceLedger } from './evidence.js';
 
 /** Reader orientation, independent of governed assessment outcomes and enforcement. */
-export const changeSummarySchema = z.strictObject({
+const changeSummarySchema = z.strictObject({
     overview: z.string().min(1).max(2000),
     reviewFocus: z.array(z.string().min(1).max(1000)).max(5),
     sourceRefs: z.array(citationSchema).min(1).max(12),
